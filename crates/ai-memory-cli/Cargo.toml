@@ -14,16 +14,20 @@ path = "src/main.rs"
 
 [dependencies]
 ai-memory-core.workspace = true
+ai-memory-mcp.workspace = true
 ai-memory-store.workspace = true
 ai-memory-wiki.workspace = true
 anyhow.workspace = true
+axum.workspace = true
 clap.workspace = true
 dirs.workspace = true
 figment.workspace = true
+rmcp.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sysinfo.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-appender.workspace = true
 tracing-subscriber.workspace = true

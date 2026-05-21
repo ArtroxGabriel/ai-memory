@@ -37,6 +37,8 @@ pub enum Command {
     WritePage(WritePageArgs),
     /// Run the filesystem watcher (foreground; Ctrl-C to stop).
     Watch(WatchArgs),
+    /// Run the MCP server (with watcher) over stdio or HTTP.
+    Serve(ServeArgs),
     /// Wipe the data directory's wiki/, db/, raw/ contents.
     Reset(ResetArgs),
 }
@@ -87,6 +89,35 @@ pub struct ResetArgs {
     /// Required to actually wipe data. Without this we just dry-run.
     #[arg(long)]
     pub confirm: bool,
+}
+
+/// Transport for the MCP server.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum TransportKind {
+    /// Stdio — what `claude mcp add` uses.
+    Stdio,
+    /// Streamable HTTP — for HTTP clients and `mcp-inspector`.
+    Http,
+}
+
+/// Arguments for `serve`.
+#[derive(Debug, Args)]
+pub struct ServeArgs {
+    /// Transport to expose the MCP server on.
+    #[arg(long, value_enum, default_value_t = TransportKind::Stdio)]
+    pub transport: TransportKind,
+    /// Bind address for `--transport http` (default: from config).
+    #[arg(long)]
+    pub bind: Option<String>,
+    /// Skip the filesystem watcher; useful for transient debugging.
+    #[arg(long)]
+    pub no_watcher: bool,
+    /// Workspace name (auto-created).
+    #[arg(long, default_value = "default")]
+    pub workspace: String,
+    /// Project name within the workspace (auto-created).
+    #[arg(long, default_value = "scratch")]
+    pub project: String,
 }
 
 /// Arguments for `write-page`.

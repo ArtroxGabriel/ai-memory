@@ -1,4 +1,13 @@
 //! MCP server for ai-memory.
 //!
-//! Wraps the official `rmcp` SDK with the workspace tool surface. Read-only
-//! tools land in milestone M2; write tools and hook ingress follow in M3.
+//! Hosts an [`AiMemoryServer`] that wraps the storage layer and exposes a
+//! deliberately narrow tool surface to coding agents. Read-only tools live
+//! here; write tools (M3+) and consolidation tools (M7+) follow.
+//!
+//! Pin the MCP protocol version explicitly so we never fall into the
+//! agentmemory #510 / #553 "negotiated-down to a version the client
+//! discards tools for" failure mode.
+
+mod server;
+
+pub use server::{AiMemoryServer, MEMORY_INSTRUCTIONS};

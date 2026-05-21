@@ -190,6 +190,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recent_pages_returns_latest_only_in_order() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "scratch", None)
+            .await
+            .unwrap();
+        for i in 0..3u8 {
+            store
+                .writer
+                .upsert_page(sample_page(
+                    ws,
+                    proj,
+                    &format!("p{i}.md"),
+                    &format!("body-{i}"),
+                ))
+                .await
+                .unwrap();
+        }
+        // Bump the second page to force a later updated_at.
+        store
+            .writer
+            .upsert_page(sample_page(ws, proj, "p1.md", "body-1-rev"))
+            .await
+            .unwrap();
+
+        let hits = store.reader.recent_pages(10).await.unwrap();
+        assert_eq!(hits.len(), 3, "is_latest filter should give us 3 pages");
+        assert_eq!(
+            hits[0].path.as_str(),
+            "p1.md",
+            "most-recently-updated first"
+        );
+    }
+
+    #[tokio::test]
     async fn status_counts_zero_on_fresh_db() {
         let tmp = TempDir::new().unwrap();
         let store = Store::open(tmp.path()).unwrap();

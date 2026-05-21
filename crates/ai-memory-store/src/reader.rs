@@ -141,6 +141,46 @@ impl ReaderPool {
         .await
     }
 
+    /// Return the N most-recently-updated `is_latest = 1` pages.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn recent_pages(&self, limit: usize) -> StoreResult<Vec<PageHit>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, path, title, \
+                        substr(body, 1, 240) AS snip, \
+                        CAST(updated_at AS REAL) AS rank \
+                 FROM pages \
+                 WHERE is_latest = 1 \
+                 ORDER BY updated_at DESC \
+                 LIMIT ?1",
+            )?;
+            #[allow(clippy::cast_possible_wrap)]
+            let rows = stmt.query_map(params![limit as i64], |row| {
+                let id_bytes: Vec<u8> = row.get(0)?;
+                let path: String = row.get(1)?;
+                let title: String = row.get(2)?;
+                let snippet: String = row.get(3)?;
+                let rank: f64 = row.get(4)?;
+                Ok((id_bytes, path, title, snippet, rank))
+            })?;
+            let mut hits = Vec::new();
+            for row in rows {
+                let (id_bytes, path, title, snippet, rank) = row?;
+                hits.push(PageHit {
+                    id: PageId::from_slice(&id_bytes)?,
+                    path: PagePath::new(path)?,
+                    title,
+                    snippet,
+                    rank,
+                });
+            }
+            Ok(hits)
+        })
+        .await
+    }
+
     /// Return aggregate counts for the `status` view.
     ///
     /// # Errors
