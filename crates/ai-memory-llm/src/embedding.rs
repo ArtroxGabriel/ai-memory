@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use tracing::debug;
 
 use crate::error::{LlmError, LlmResult};
+use crate::openai::normalize_openai_base;
 
 /// Provider-agnostic embedding API.
 ///
@@ -57,8 +58,13 @@ impl OpenAiEmbedder {
     /// Propagates any `reqwest::Error` thrown while building the HTTP
     /// client.
     pub fn new(api_key: SecretString, model: impl Into<String>, dim: u32) -> LlmResult<Self> {
+        // 120s tolerates a cold-load of the embedding model on Ollama
+        // (small model, but still up to ~30s on first request after
+        // unload). Subsequent requests with OLLAMA_KEEP_ALIVE warm are
+        // sub-second. When the embedder still fails, memory_query
+        // degrades gracefully to BM25-only (see server.rs).
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(120))
             .build()?;
         Ok(Self {
             client,
@@ -108,7 +114,7 @@ impl Embedder for OpenAiEmbedder {
     }
 
     async fn embed(&self, text: &str) -> LlmResult<Vec<f32>> {
-        let url = format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/v1/embeddings", normalize_openai_base(&self.base_url));
         debug!(url, model = %self.model, "POST openai/embeddings");
         let req = OpenAiEmbeddingRequest {
             input: text,
@@ -160,8 +166,13 @@ impl VoyageEmbedder {
     /// # Errors
     /// Propagates the HTTP client construction error.
     pub fn new(api_key: SecretString, model: impl Into<String>, dim: u32) -> LlmResult<Self> {
+        // 120s tolerates a cold-load of the embedding model on Ollama
+        // (small model, but still up to ~30s on first request after
+        // unload). Subsequent requests with OLLAMA_KEEP_ALIVE warm are
+        // sub-second. When the embedder still fails, memory_query
+        // degrades gracefully to BM25-only (see server.rs).
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(60))
+            .timeout(Duration::from_secs(120))
             .build()?;
         Ok(Self {
             client,
@@ -211,7 +222,7 @@ impl Embedder for VoyageEmbedder {
     }
 
     async fn embed(&self, text: &str) -> LlmResult<Vec<f32>> {
-        let url = format!("{}/v1/embeddings", self.base_url.trim_end_matches('/'));
+        let url = format!("{}/v1/embeddings", normalize_openai_base(&self.base_url));
         let req = VoyageRequest {
             input: [text],
             model: &self.model,

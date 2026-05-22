@@ -248,24 +248,36 @@ impl AiMemoryServer {
         Parameters(args): Parameters<QueryArgs>,
     ) -> Result<CallToolResult, McpError> {
         let limit = args.limit.unwrap_or(self.default_limit).clamp(1, 100);
+        // Hybrid path: try to embed the query; if it fails (provider
+        // outage, cold-start timeout, billing, etc.) degrade to BM25
+        // instead of erroring the whole query — losing semantic
+        // re-ranking is acceptable, denying the user any search isn't.
         let hits = if let Some(embedder) = &self.embedder {
-            // Hybrid path: embed the query, RRF-fuse with FTS5.
-            let qv = embedder
-                .embed(&args.query)
-                .await
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            self.reader
-                .hybrid_search(
-                    self.workspace_id,
-                    self.project_id,
-                    args.query,
-                    Some(qv),
-                    embedder.provider().to_string(),
-                    embedder.model().to_string(),
-                    embedder.dim(),
-                    limit,
-                )
-                .await
+            match embedder.embed(&args.query).await {
+                Ok(qv) => {
+                    self.reader
+                        .hybrid_search(
+                            self.workspace_id,
+                            self.project_id,
+                            args.query.clone(),
+                            Some(qv),
+                            embedder.provider().to_string(),
+                            embedder.model().to_string(),
+                            embedder.dim(),
+                            limit,
+                        )
+                        .await
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        provider = embedder.provider(),
+                        model = embedder.model(),
+                        error = %e,
+                        "embedder failed; degrading memory_query to BM25-only"
+                    );
+                    self.reader.search_pages(args.query, limit).await
+                }
+            }
         } else {
             self.reader.search_pages(args.query, limit).await
         };

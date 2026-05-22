@@ -15,6 +15,21 @@ use crate::types::{ChatRequest, ChatResponse, Role, Usage};
 /// Default OpenAI API base.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 
+/// Trim a trailing `/` and one optional `/v1` segment off an
+/// OpenAI-style base URL so the caller can append `/v1/<endpoint>`
+/// safely. Tolerates both conventions found in the wild:
+///   * `https://api.openai.com`           (OpenAI's own docs)
+///   * `https://openrouter.ai/api/v1`     (OpenRouter's docs)
+///   * `http://localhost:11434/v1`        (Ollama's openai-compat path)
+///
+/// Without this, half the providers produce `…/v1/v1/…` 404s the
+/// first time consolidation runs.
+#[must_use]
+pub fn normalize_openai_base(url: &str) -> String {
+    let s = url.trim_end_matches('/');
+    s.strip_suffix("/v1").unwrap_or(s).to_string()
+}
+
 /// OpenAI Chat Completions-backed provider.
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -29,8 +44,12 @@ impl OpenAiProvider {
     /// # Errors
     /// Returns a `reqwest::Error` if the HTTP client cannot be built.
     pub fn new(api_key: SecretString, model: impl Into<String>) -> LlmResult<Self> {
+        // 300s tolerates Ollama / llama-swap cold-loading a 30B+ model
+        // from disk on first request. Once OLLAMA_KEEP_ALIVE keeps it
+        // warm, subsequent requests return in seconds — but the first
+        // one after the model unloaded needs the headroom.
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(300))
             .build()?;
         Ok(Self {
             client,
@@ -194,7 +213,7 @@ impl OpenAiProvider {
     async fn post<B: Serialize>(&self, body: &B) -> LlmResult<OpenAiResponse> {
         let url = format!(
             "{}/v1/chat/completions",
-            self.base_url.trim_end_matches('/')
+            normalize_openai_base(&self.base_url)
         );
         debug!(url, "POST openai");
         let resp = self
@@ -222,5 +241,30 @@ fn truncate(s: &str, n: usize) -> String {
         s.to_string()
     } else {
         format!("{}…", &s[..n])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_openai_base;
+
+    #[test]
+    fn normalize_strips_trailing_slash_and_v1() {
+        // The three conventions found in the wild.
+        assert_eq!(normalize_openai_base("https://api.openai.com"),
+                   "https://api.openai.com");
+        assert_eq!(normalize_openai_base("https://api.openai.com/"),
+                   "https://api.openai.com");
+        // OpenRouter's docs / ai-memory's OpenRouter env entry.
+        assert_eq!(normalize_openai_base("https://openrouter.ai/api/v1"),
+                   "https://openrouter.ai/api");
+        // Ollama's openai-compat path (`docker logs` shows it
+        // canonically advertised this way).
+        assert_eq!(normalize_openai_base("http://localhost:11434/v1"),
+                   "http://localhost:11434");
+        // Don't accidentally strip a `/v1` that's part of a longer
+        // segment (e.g. `/v123/`).
+        assert_eq!(normalize_openai_base("https://example.com/v123"),
+                   "https://example.com/v123");
     }
 }

@@ -32,8 +32,11 @@ impl AnthropicProvider {
     /// Returns a `reqwest::Error` if the underlying HTTP client cannot
     /// be built.
     pub fn new(api_key: SecretString, model: impl Into<String>) -> LlmResult<Self> {
+        // 300s matches the OpenAI/openai-compat client — same reason:
+        // first request after a model swap on a local inference server
+        // (Ollama, llama-swap, vLLM) can take 30-90s of cold-load.
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(300))
             .build()?;
         Ok(Self {
             client,
