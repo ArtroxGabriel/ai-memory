@@ -20,6 +20,7 @@
 //!   No tenacity-style 8-128s backoff (cognee #2840 lesson).
 
 pub mod anthropic;
+pub mod embedding;
 pub mod error;
 pub mod factory;
 pub mod openai;
@@ -28,8 +29,12 @@ pub mod provider;
 pub mod types;
 
 pub use anthropic::AnthropicProvider;
+pub use embedding::{Embedder, OpenAiEmbedder, SyntheticEmbedder, VoyageEmbedder, cosine};
 pub use error::{LlmError, LlmResult};
-pub use factory::{ProviderChoice, ProviderConfig, build_provider, provider_from_env};
+pub use factory::{
+    EmbedderChoice, EmbedderConfig, ProviderChoice, ProviderConfig, build_embedder, build_provider,
+    embedder_from_env, provider_from_env,
+};
 pub use openai::OpenAiProvider;
 pub use openai_compat::OpenAiCompatProvider;
 pub use provider::{LlmProvider, complete_structured};

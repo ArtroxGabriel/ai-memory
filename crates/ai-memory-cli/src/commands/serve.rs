@@ -1,7 +1,7 @@
 //! `ai-memory serve` — MCP server with optional filesystem watcher.
 
 use ai_memory_hooks::{HookState, hook_router};
-use ai_memory_llm::provider_from_env;
+use ai_memory_llm::{build_embedder, embedder_from_env, provider_from_env};
 use ai_memory_mcp::AiMemoryServer;
 use ai_memory_store::Store;
 use ai_memory_wiki::{WatcherHandle, Wiki};
@@ -33,7 +33,35 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         .writer
         .get_or_create_project(ws, args.project.clone(), None)
         .await?;
-    let wiki = Wiki::new(&config.data_dir, store.writer.clone())?;
+    let mut wiki = Wiki::new(&config.data_dir, store.writer.clone())?;
+
+    // M9 — pluggable embedder. Refuse to start if any stored
+    // embeddings disagree with the configured (provider, model, dim).
+    let embedder = if let Some(cfg) = embedder_from_env()? {
+        let mismatch = store
+            .reader
+            .embedding_meta_for_mismatch(cfg.provider.name().into(), cfg.model.clone(), cfg.dim)
+            .await?;
+        if !mismatch.is_empty() {
+            anyhow::bail!(
+                "embedding (provider, model, dim) mismatch with stored data: {:?} \
+                 — run `ai-memory embed --reembed` to migrate",
+                mismatch
+            );
+        }
+        let e = build_embedder(cfg).context("building embedder from env")?;
+        info!(
+            provider = e.provider(),
+            model = e.model(),
+            dim = e.dim(),
+            "embedder enabled"
+        );
+        wiki = wiki.with_embedder(e.clone());
+        Some(e)
+    } else {
+        info!("AI_MEMORY_EMBEDDING_PROVIDER unset; hybrid search disabled (FTS5-only)");
+        None
+    };
 
     // Keep the guard alive for the lifetime of `serve`.
     let _watcher = if args.no_watcher {
@@ -52,6 +80,9 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
     let mut server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj)
         .with_wiki(wiki.clone())
         .with_decay_params(config.decay);
+    if let Some(e) = embedder.clone() {
+        server = server.with_embedder(e);
+    }
     if let Some(cfg) = provider_from_env()? {
         let llm = ai_memory_llm::build_provider(cfg).context("building LLM provider from env")?;
         info!(

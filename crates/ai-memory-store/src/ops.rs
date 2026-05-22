@@ -375,6 +375,33 @@ pub fn insert_observation(
     Ok(id)
 }
 
+/// Store / replace one page's embedding. Bytes are the host-endian
+/// `f32` packing of the unit-normalised vector. Provider/model/dim
+/// are denormalised onto the row so a single SELECT can detect
+/// heterogeneity (refuse-on-mismatch path).
+pub fn store_embedding(
+    conn: &mut Connection,
+    page_id: &PageId,
+    vector_bytes: &[u8],
+    provider: &str,
+    model: &str,
+    dim: u32,
+) -> StoreResult<()> {
+    let now = Timestamp::now().as_microsecond();
+    conn.execute(
+        "INSERT INTO page_embeddings (page_id, vector, provider, model, dim, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(page_id) DO UPDATE SET \
+             vector = excluded.vector, \
+             provider = excluded.provider, \
+             model = excluded.model, \
+             dim = excluded.dim, \
+             created_at = excluded.created_at",
+        params![page_id.as_bytes(), vector_bytes, provider, model, dim, now,],
+    )?;
+    Ok(())
+}
+
 /// Bump `access_count` + `last_accessed_at` for the pages whose ids
 /// appear in `page_ids`. Idempotent for unknown ids (no-op).
 /// Used by the read path to feed the M8 reinforcement term.

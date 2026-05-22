@@ -51,5 +51,6 @@ async fn main() -> Result<()> {
         Command::LlmTest(args) => commands::llm_test::run(&config, args).await,
         Command::ForgetSweep(args) => commands::forget_sweep::run(&config, args).await,
         Command::Lint(args) => commands::lint::run(&config, args).await,
+        Command::Embed(args) => commands::embed::run(&config, args).await,
     }
 }

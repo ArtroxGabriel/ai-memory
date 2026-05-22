@@ -75,6 +75,14 @@ pub(crate) enum WriteCmd {
         hard_delete_after_days: i64,
         reply: oneshot::Sender<StoreResult<usize>>,
     },
+    StoreEmbedding {
+        page_id: PageId,
+        vector_bytes: Vec<u8>,
+        provider: String,
+        model: String,
+        dim: u32,
+        reply: oneshot::Sender<StoreResult<()>>,
+    },
     Shutdown,
 }
 
@@ -214,6 +222,31 @@ impl WriterHandle {
             handoff_id,
             accepting_agent,
             accepting_session,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Store (or replace) the embedding for one page (M9).
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn store_embedding(
+        &self,
+        page_id: PageId,
+        vector_bytes: Vec<u8>,
+        provider: String,
+        model: String,
+        dim: u32,
+    ) -> StoreResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::StoreEmbedding {
+            page_id,
+            vector_bytes,
+            provider,
+            model,
+            dim,
             reply: tx,
         })
         .await?;
@@ -382,6 +415,24 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                 reply,
             } => {
                 let result = ops::hard_delete_decayed_pages(&mut conn, hard_delete_after_days);
+                let _ = reply.send(result);
+            }
+            WriteCmd::StoreEmbedding {
+                page_id,
+                vector_bytes,
+                provider,
+                model,
+                dim,
+                reply,
+            } => {
+                let result = ops::store_embedding(
+                    &mut conn,
+                    &page_id,
+                    &vector_bytes,
+                    &provider,
+                    &model,
+                    dim,
+                );
                 let _ = reply.send(result);
             }
         }

@@ -1,9 +1,11 @@
 //! [`Wiki`] — the only correct write path for the markdown source-of-truth.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ai_memory_core::{NewPage, PageId, PagePath, ProjectId, Tier, WorkspaceId};
-use ai_memory_store::WriterHandle;
+use ai_memory_llm::Embedder;
+use ai_memory_store::{WriterHandle, f32_vec_to_bytes};
 
 use crate::atomic;
 use crate::error::WikiResult;
@@ -22,6 +24,7 @@ pub struct Wiki {
     root: PathBuf,
     writer: WriterHandle,
     git: GitAdapter,
+    embedder: Option<Arc<dyn Embedder>>,
 }
 
 impl Wiki {
@@ -35,7 +38,29 @@ impl Wiki {
         let root = data_dir.join("wiki");
         std::fs::create_dir_all(&root)?;
         let git = GitAdapter::open_or_init(&root)?;
-        Ok(Self { root, writer, git })
+        Ok(Self {
+            root,
+            writer,
+            git,
+            embedder: None,
+        })
+    }
+
+    /// Attach an embedder. When set, every successful `write_page` /
+    /// `apply_batch` also computes + stores an embedding for the new
+    /// version. Without this, vector search is unavailable and
+    /// `ReaderPool::hybrid_search` falls back to pure FTS5.
+    #[must_use]
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
+    }
+
+    /// Borrow the optional embedder (used by the `ai-memory embed`
+    /// backfill command).
+    #[must_use]
+    pub fn embedder(&self) -> Option<&Arc<dyn Embedder>> {
+        self.embedder.as_ref()
     }
 
     /// Borrow the git adapter (for callers wiring auto-commit).
@@ -222,12 +247,35 @@ impl Wiki {
                 project_id,
                 path,
                 title,
-                body,
+                body: body.clone(),
                 tier,
                 frontmatter_json: frontmatter,
                 pinned,
             })
             .await?;
+        // Embed if configured. We do this on the caller's task so the
+        // tool reply still happens "indexes commit in the same
+        // transaction" (basic-memory #763 lesson): no fire-and-forget
+        // background embedding.
+        if let Some(embedder) = &self.embedder {
+            match embedder.embed(&body).await {
+                Ok(vec) => {
+                    let bytes = f32_vec_to_bytes(&vec);
+                    self.writer
+                        .store_embedding(
+                            page_id,
+                            bytes,
+                            embedder.provider().to_string(),
+                            embedder.model().to_string(),
+                            embedder.dim(),
+                        )
+                        .await?;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %page_id, "embedding failed; page indexed without it");
+                }
+            }
+        }
         Ok(page_id)
     }
 }

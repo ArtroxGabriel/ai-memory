@@ -214,6 +214,103 @@ impl ReaderPool {
         .await
     }
 
+    /// Load every `is_latest=1` page's embedding for the project, but
+    /// only when the stored `(provider, model, dim)` matches the
+    /// caller's expectation. Mismatched rows are skipped (the
+    /// refuse-on-mismatch check is `embedding_meta_for_mismatch`).
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn load_embeddings(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        provider: String,
+        model: String,
+        dim: u32,
+    ) -> StoreResult<Vec<StoredEmbedding>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT page_embeddings.page_id, page_embeddings.vector, pages.path \
+                 FROM page_embeddings \
+                 JOIN pages ON pages.id = page_embeddings.page_id \
+                 WHERE pages.workspace_id = ?1 \
+                   AND pages.project_id = ?2 \
+                   AND pages.is_latest = 1 \
+                   AND page_embeddings.provider = ?3 \
+                   AND page_embeddings.model = ?4 \
+                   AND page_embeddings.dim = ?5",
+            )?;
+            let rows = stmt.query_map(
+                params![
+                    workspace_id.as_bytes(),
+                    project_id.as_bytes(),
+                    provider,
+                    model,
+                    dim,
+                ],
+                |row| {
+                    let id_bytes: Vec<u8> = row.get(0)?;
+                    let vec_bytes: Vec<u8> = row.get(1)?;
+                    let path: String = row.get(2)?;
+                    Ok((id_bytes, vec_bytes, path))
+                },
+            )?;
+            let mut out = Vec::new();
+            for r in rows {
+                let (id_bytes, vec_bytes, path) = r?;
+                let id = PageId::from_slice(&id_bytes)?;
+                let path = PagePath::new(path)?;
+                let vector = bytes_to_f32_vec(&vec_bytes, dim)?;
+                out.push(StoredEmbedding { id, path, vector });
+            }
+            Ok(out)
+        })
+        .await
+    }
+
+    /// Return any `(provider, model, dim)` triples currently stored
+    /// that *don't* match the caller's expectation. An empty vec
+    /// means "all clean". Used at startup for the refuse-on-mismatch
+    /// (agentmemory #469 lesson).
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn embedding_meta_for_mismatch(
+        &self,
+        provider: String,
+        model: String,
+        dim: u32,
+    ) -> StoreResult<Vec<(String, String, u32, u64)>> {
+        self.with_conn(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT provider, model, dim, COUNT(*) \
+                 FROM page_embeddings \
+                 WHERE NOT (provider = ?1 AND model = ?2 AND dim = ?3) \
+                 GROUP BY provider, model, dim",
+            )?;
+            let rows = stmt.query_map(params![provider, model, dim], |row| {
+                let provider: String = row.get(0)?;
+                let model: String = row.get(1)?;
+                let dim: i64 = row.get(2)?;
+                let count: i64 = row.get(3)?;
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                Ok((
+                    provider,
+                    model,
+                    dim as u32,
+                    u64::try_from(count).unwrap_or(0),
+                ))
+            })?;
+            let mut out = Vec::new();
+            for r in rows {
+                out.push(r?);
+            }
+            Ok(out)
+        })
+        .await
+    }
+
     /// Return decay-evaluation candidates for the M8 forget sweep.
     ///
     /// Walks `pages` rows with `is_latest = 1` and returns the columns
@@ -247,6 +344,102 @@ impl ReaderPool {
             Ok(out)
         })
         .await
+    }
+
+    /// Hybrid search: RRF-fuse FTS5 results with cosine-similarity
+    /// over the stored embeddings of the matching `(provider, model,
+    /// dim)`. Returns the top-`limit` pages by fused score.
+    ///
+    /// When `query_vec` is `None`, falls back to pure FTS5
+    /// (equivalent to [`Self::search_pages`]). When no embeddings
+    /// exist for the configured triple, also falls back to pure FTS5.
+    ///
+    /// k=60 is the canonical RRF constant.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn hybrid_search(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        query: String,
+        query_vec: Option<Vec<f32>>,
+        provider: String,
+        model: String,
+        dim: u32,
+        limit: usize,
+    ) -> StoreResult<Vec<PageHit>> {
+        // Fetch FTS5 hits first.
+        let fts_hits = self.search_pages(query, limit * 2).await?;
+        let Some(qv) = query_vec else {
+            // No query vector → pure FTS5.
+            let mut out = fts_hits;
+            out.truncate(limit);
+            return Ok(out);
+        };
+        // Compute cosines against all stored embeddings.
+        let stored = self
+            .load_embeddings(workspace_id, project_id, provider, model, dim)
+            .await?;
+        if stored.is_empty() {
+            let mut out = fts_hits;
+            out.truncate(limit);
+            return Ok(out);
+        }
+        let mut vec_hits: Vec<(PageId, PagePath, f32)> = stored
+            .iter()
+            .map(|s| {
+                let score = dot(&qv, &s.vector);
+                (s.id, s.path.clone(), score)
+            })
+            .collect();
+        vec_hits.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+        vec_hits.truncate(limit * 2);
+
+        // RRF fuse: score(d) = Σ 1/(k + rank_i(d)) over rankers.
+        let k = 60.0_f64;
+        let mut fused: std::collections::HashMap<PageId, (PagePath, String, String, f64, f64)> =
+            std::collections::HashMap::new();
+
+        for (rank, h) in fts_hits.iter().enumerate() {
+            let contrib = 1.0 / (k + (rank + 1) as f64);
+            fused
+                .entry(h.id)
+                .and_modify(|entry| entry.3 += contrib)
+                .or_insert((
+                    h.path.clone(),
+                    h.title.clone(),
+                    h.snippet.clone(),
+                    contrib,
+                    h.rank,
+                ));
+        }
+        for (rank, (id, path, _score)) in vec_hits.iter().enumerate() {
+            let contrib = 1.0 / (k + (rank + 1) as f64);
+            fused
+                .entry(*id)
+                .and_modify(|entry| entry.3 += contrib)
+                .or_insert((path.clone(), String::new(), String::new(), contrib, 0.0));
+        }
+
+        let mut out: Vec<PageHit> = fused
+            .into_iter()
+            .map(|(id, (path, title, snippet, fused_rank, _orig))| PageHit {
+                id,
+                path,
+                title,
+                snippet,
+                rank: -fused_rank, // lower = better (matches FTS5 convention)
+            })
+            .collect();
+        out.sort_by(|a, b| {
+            a.rank
+                .partial_cmp(&b.rank)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        out.truncate(limit);
+        Ok(out)
     }
 
     /// Return the latest open handoff for the project, optionally
@@ -407,6 +600,50 @@ fn materialise_observation(
             )))
         })?,
     })
+}
+
+/// One stored embedding row, materialised for the vector path.
+#[derive(Debug, Clone)]
+pub struct StoredEmbedding {
+    /// Page identifier (always the `is_latest=1` row's id).
+    pub id: PageId,
+    /// Relative wiki path.
+    pub path: PagePath,
+    /// Unit-normalised vector.
+    pub vector: Vec<f32>,
+}
+
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    a.iter().zip(b).map(|(x, y)| x * y).sum()
+}
+
+fn bytes_to_f32_vec(bytes: &[u8], dim: u32) -> StoreResult<Vec<f32>> {
+    let expected = (dim as usize) * 4;
+    if bytes.len() != expected {
+        return Err(StoreError::Memory(
+            ai_memory_core::MemoryError::MalformedRecord(format!(
+                "embedding bytes {} != expected {}",
+                bytes.len(),
+                expected
+            )),
+        ));
+    }
+    let mut out = Vec::with_capacity(dim as usize);
+    for chunk in bytes.chunks_exact(4) {
+        out.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(out)
+}
+
+/// Pack a `&[f32]` into little-endian bytes for storage. Inverse of
+/// [`bytes_to_f32_vec`].
+#[must_use]
+pub fn f32_vec_to_bytes(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
 }
 
 /// One row's worth of input for the M8 retention formula.

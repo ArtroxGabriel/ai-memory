@@ -55,6 +55,8 @@ pub enum Command {
     ForgetSweep(ForgetSweepArgs),
     /// Run the M8 lint pass (stale / duplicates + optional LLM contradiction).
     Lint(LintArgs),
+    /// Compute + store embeddings for every latest page (M9).
+    Embed(EmbedArgs),
 }
 
 /// Arguments for `init`.
@@ -152,6 +154,24 @@ pub enum LlmProviderChoice {
     Openai,
     /// OpenAI-compatible local (Ollama, vLLM, LM Studio).
     OpenaiCompat,
+}
+
+/// Arguments for `embed`.
+#[derive(Debug, Args)]
+pub struct EmbedArgs {
+    /// Report what would be embedded without actually mutating.
+    #[arg(long)]
+    pub dry_run: bool,
+    /// Re-embed pages even when they already have a row with the
+    /// currently-configured `(provider, model, dim)`.
+    #[arg(long)]
+    pub force: bool,
+    /// Workspace name (auto-created if absent).
+    #[arg(long, default_value = "default")]
+    pub workspace: String,
+    /// Project name within the workspace (auto-created if absent).
+    #[arg(long, default_value = "scratch")]
+    pub project: String,
 }
 
 /// Arguments for `forget-sweep`.

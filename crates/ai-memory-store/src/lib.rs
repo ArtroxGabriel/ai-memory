@@ -21,7 +21,9 @@ mod writer;
 
 pub use decay::{DecayParams, retention_score};
 pub use error::{StoreError, StoreResult};
-pub use reader::{DecayCandidate, PageHit, ReaderPool, StatusCounts};
+pub use reader::{
+    DecayCandidate, PageHit, ReaderPool, StatusCounts, StoredEmbedding, f32_vec_to_bytes,
+};
 pub use writer::WriterHandle;
 
 /// Filename used inside the data dir's `db/` subdirectory.

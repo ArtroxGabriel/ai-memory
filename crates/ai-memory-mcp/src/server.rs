@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use ai_memory_consolidate::{Consolidator, run_lint, run_sweep};
 use ai_memory_core::{AgentKind, NewHandoff, PageId, ProjectId, SessionId, WorkspaceId};
-use ai_memory_llm::LlmProvider;
+use ai_memory_llm::{Embedder, LlmProvider};
 use ai_memory_store::{DecayParams, ReaderPool, WriterHandle};
 use ai_memory_wiki::Wiki;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -45,6 +45,9 @@ pub struct AiMemoryServer {
     /// M8 retention parameters. Defaults if not overridden by the
     /// caller (typically from the user's config.toml `[decay]` block).
     decay_params: DecayParams,
+    /// M9 embedder for hybrid query. When `None`, `memory_query`
+    /// falls back to pure FTS5.
+    embedder: Option<Arc<dyn Embedder>>,
     // Read by the `#[tool_handler]` macro expansion; rustc's dead-code
     // analysis can't see that, so the lint must be allowed explicitly.
     #[allow(dead_code)]
@@ -151,8 +154,17 @@ impl AiMemoryServer {
             llm: None,
             wiki: None,
             decay_params: DecayParams::default(),
+            embedder: None,
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Attach an embedder for hybrid (FTS5 + vector RRF) query. Without
+    /// this, `memory_query` runs pure FTS5.
+    #[must_use]
+    pub fn with_embedder(mut self, embedder: Arc<dyn Embedder>) -> Self {
+        self.embedder = Some(embedder);
+        self
     }
 
     /// Override the retention-sweep parameters (typically populated
@@ -202,11 +214,28 @@ impl AiMemoryServer {
         Parameters(args): Parameters<QueryArgs>,
     ) -> Result<CallToolResult, McpError> {
         let limit = args.limit.unwrap_or(self.default_limit).clamp(1, 100);
-        let hits = self
-            .reader
-            .search_pages(args.query, limit)
-            .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        let hits = if let Some(embedder) = &self.embedder {
+            // Hybrid path: embed the query, RRF-fuse with FTS5.
+            let qv = embedder
+                .embed(&args.query)
+                .await
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            self.reader
+                .hybrid_search(
+                    self.workspace_id,
+                    self.project_id,
+                    args.query,
+                    Some(qv),
+                    embedder.provider().to_string(),
+                    embedder.model().to_string(),
+                    embedder.dim(),
+                    limit,
+                )
+                .await
+        } else {
+            self.reader.search_pages(args.query, limit).await
+        };
+        let hits = hits.map_err(|e| McpError::internal_error(e.to_string(), None))?;
         self.spawn_access_bump(hits.iter().map(|h| h.id).collect());
         let response = QueryResponse { hits };
         ok_json(&response)

@@ -2,6 +2,7 @@
 
 pub mod backup;
 pub mod commit;
+pub mod embed;
 pub mod forget_sweep;
 pub mod init;
 pub mod install_hooks;
