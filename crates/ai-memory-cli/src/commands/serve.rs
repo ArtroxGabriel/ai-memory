@@ -48,7 +48,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
         Some(WatcherHandle::start(wiki.clone(), ws, proj)?)
     };
 
-    let server = AiMemoryServer::new(store.reader.clone());
+    let server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj);
 
     match args.transport {
         TransportKind::Stdio => {

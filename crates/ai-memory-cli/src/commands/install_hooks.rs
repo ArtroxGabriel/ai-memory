@@ -23,12 +23,33 @@ pub fn run(_config: &Config, args: InstallHooksArgs) -> Result<()> {
     let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
     match args.agent {
         AgentChoice::ClaudeCode => render_claude_code(&hooks_dir, &args.server_url),
+        AgentChoice::Codex => render_agent("codex", &hooks_dir, &args.server_url),
+        AgentChoice::OpenCode => render_agent("opencode", &hooks_dir, &args.server_url),
     }
+}
+
+fn render_agent(label: &str, hooks_dir: &Path, server_url: &str) -> Result<()> {
+    println!("# {label} hook scripts (manual install — wire each to the matching event)");
+    println!("# Hook scripts: {}", hooks_dir.display());
+    println!("# AI-memory server URL: {server_url}");
+    println!();
+    for entry in std::fs::read_dir(hooks_dir)? {
+        let entry = entry?;
+        let p = entry.path();
+        if p.is_file() && p.extension().is_some_and(|e| e == "sh") {
+            println!("- {}", p.display());
+        }
+    }
+    println!();
+    println!("Set AI_MEMORY_HOOK_URL in each hook's environment to override the default.");
+    Ok(())
 }
 
 fn resolve_hooks_dir(explicit: Option<&Path>, agent: AgentChoice) -> Result<PathBuf> {
     let sub = match agent {
         AgentChoice::ClaudeCode => "claude-code",
+        AgentChoice::Codex => "codex",
+        AgentChoice::OpenCode => "opencode",
     };
     if let Some(p) = explicit {
         let path = p.join(sub);

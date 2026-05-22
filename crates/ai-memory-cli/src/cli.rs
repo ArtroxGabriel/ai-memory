@@ -121,6 +121,10 @@ pub struct RestoreArgs {
 pub enum AgentChoice {
     /// Anthropic Claude Code.
     ClaudeCode,
+    /// OpenAI Codex CLI.
+    Codex,
+    /// OpenCode (open-source coding agent).
+    OpenCode,
 }
 
 /// Arguments for `install-hooks`.

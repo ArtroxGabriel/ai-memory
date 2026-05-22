@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ai_memory_core::{
-    Observation, ObservationId, ObservationKind, PageId, PagePath, ProjectId, SessionId,
-    WorkspaceId,
+    AgentKind, Handoff, HandoffId, HandoffState, Observation, ObservationId, ObservationKind,
+    PageId, PagePath, ProjectId, SessionId, WorkspaceId,
 };
 use parking_lot::Mutex;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
@@ -211,6 +211,77 @@ impl ReaderPool {
         .await
     }
 
+    /// Return the latest open handoff for the project, optionally
+    /// filtered to a specific `cwd`.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn latest_open_handoff(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        cwd_filter: Option<String>,
+    ) -> StoreResult<Option<Handoff>> {
+        self.with_conn(move |conn| {
+            let mut stmt: rusqlite::Statement<'_> = if let Some(_cwd) = cwd_filter.as_deref() {
+                conn.prepare(
+                    "SELECT id, workspace_id, project_id, from_session_id, from_agent, to_agent, \
+                            cwd, summary, open_questions, next_steps, files_touched, state, \
+                            created_at, accepted_by, accepted_at, accepted_by_session \
+                     FROM handoffs \
+                     WHERE workspace_id = ?1 AND project_id = ?2 AND cwd = ?3 \
+                       AND state = 'open' \
+                     ORDER BY created_at DESC LIMIT 1",
+                )?
+            } else {
+                conn.prepare(
+                    "SELECT id, workspace_id, project_id, from_session_id, from_agent, to_agent, \
+                            cwd, summary, open_questions, next_steps, files_touched, state, \
+                            created_at, accepted_by, accepted_at, accepted_by_session \
+                     FROM handoffs \
+                     WHERE workspace_id = ?1 AND project_id = ?2 AND state = 'open' \
+                     ORDER BY created_at DESC LIMIT 1",
+                )?
+            };
+            let row_opt = if let Some(c) = cwd_filter.as_deref() {
+                stmt.query_row(
+                    params![workspace_id.as_bytes(), project_id.as_bytes(), c],
+                    row_to_handoff,
+                )
+                .optional()?
+            } else {
+                stmt.query_row(
+                    params![workspace_id.as_bytes(), project_id.as_bytes()],
+                    row_to_handoff,
+                )
+                .optional()?
+            };
+            row_opt.transpose()
+        })
+        .await
+    }
+
+    /// Look up a handoff by id.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn handoff_by_id(&self, handoff_id: HandoffId) -> StoreResult<Option<Handoff>> {
+        self.with_conn(move |conn| {
+            let row = conn
+                .query_row(
+                    "SELECT id, workspace_id, project_id, from_session_id, from_agent, to_agent, \
+                            cwd, summary, open_questions, next_steps, files_touched, state, \
+                            created_at, accepted_by, accepted_at, accepted_by_session \
+                     FROM handoffs WHERE id = ?1",
+                    params![handoff_id.as_bytes()],
+                    row_to_handoff,
+                )
+                .optional()?;
+            row.transpose()
+        })
+        .await
+    }
+
     /// Snapshot the database to `dest_path` using SQLite's online backup
     /// API. The source DB stays writable for the duration of the copy.
     ///
@@ -298,6 +369,113 @@ fn materialise_observation(
             )))
         })?,
     })
+}
+
+fn row_to_handoff(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoreResult<Handoff>> {
+    let id_bytes: Vec<u8> = row.get(0)?;
+    let ws_bytes: Vec<u8> = row.get(1)?;
+    let pj_bytes: Vec<u8> = row.get(2)?;
+    let from_session_bytes: Option<Vec<u8>> = row.get(3)?;
+    let from_agent: String = row.get(4)?;
+    let to_agent: Option<String> = row.get(5)?;
+    let cwd: Option<String> = row.get(6)?;
+    let summary: String = row.get(7)?;
+    let open_q_json: String = row.get(8)?;
+    let next_s_json: String = row.get(9)?;
+    let files_json: String = row.get(10)?;
+    let state: String = row.get(11)?;
+    let created_us: i64 = row.get(12)?;
+    let accepted_by: Option<String> = row.get(13)?;
+    let accepted_at_us: Option<i64> = row.get(14)?;
+    let accepted_by_session_bytes: Option<Vec<u8>> = row.get(15)?;
+    Ok(materialise_handoff(
+        id_bytes,
+        ws_bytes,
+        pj_bytes,
+        from_session_bytes,
+        from_agent,
+        to_agent,
+        cwd,
+        summary,
+        open_q_json,
+        next_s_json,
+        files_json,
+        state,
+        created_us,
+        accepted_by,
+        accepted_at_us,
+        accepted_by_session_bytes,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn materialise_handoff(
+    id_bytes: Vec<u8>,
+    ws_bytes: Vec<u8>,
+    pj_bytes: Vec<u8>,
+    from_session_bytes: Option<Vec<u8>>,
+    from_agent: String,
+    to_agent: Option<String>,
+    cwd: Option<String>,
+    summary: String,
+    open_q_json: String,
+    next_s_json: String,
+    files_json: String,
+    state: String,
+    created_us: i64,
+    accepted_by: Option<String>,
+    accepted_at_us: Option<i64>,
+    accepted_by_session_bytes: Option<Vec<u8>>,
+) -> StoreResult<Handoff> {
+    let open_questions: Vec<String> = serde_json::from_str(&open_q_json)?;
+    let next_steps: Vec<String> = serde_json::from_str(&next_s_json)?;
+    let files_touched: Vec<String> = serde_json::from_str(&files_json)?;
+    let from_session = from_session_bytes
+        .as_deref()
+        .map(SessionId::from_slice)
+        .transpose()?;
+    let accepted_session = accepted_by_session_bytes
+        .as_deref()
+        .map(SessionId::from_slice)
+        .transpose()?;
+    Ok(Handoff {
+        id: HandoffId::from_slice(&id_bytes)?,
+        workspace_id: WorkspaceId::from_slice(&ws_bytes)?,
+        project_id: ProjectId::from_slice(&pj_bytes)?,
+        from_session_id: from_session,
+        from_agent: parse_agent(&from_agent),
+        to_agent: to_agent.as_deref().map(parse_agent),
+        cwd,
+        summary,
+        open_questions,
+        next_steps,
+        files_touched,
+        state: state.parse::<HandoffState>().map_err(StoreError::from)?,
+        created_at: jiff::Timestamp::from_microsecond(created_us).map_err(|e| {
+            StoreError::Memory(ai_memory_core::MemoryError::MalformedRecord(format!(
+                "bad created_at: {e}"
+            )))
+        })?,
+        accepted_by: accepted_by.as_deref().map(parse_agent),
+        accepted_at: accepted_at_us
+            .map(jiff::Timestamp::from_microsecond)
+            .transpose()
+            .map_err(|e| {
+                StoreError::Memory(ai_memory_core::MemoryError::MalformedRecord(format!(
+                    "bad accepted_at: {e}"
+                )))
+            })?,
+        accepted_by_session: accepted_session,
+    })
+}
+
+fn parse_agent(s: &str) -> AgentKind {
+    match s {
+        "claude-code" => AgentKind::ClaudeCode,
+        "codex" => AgentKind::Codex,
+        "open-code" => AgentKind::OpenCode,
+        _ => AgentKind::Other,
+    }
 }
 
 fn count(conn: &Connection, sql: &str) -> StoreResult<u64> {

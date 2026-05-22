@@ -11,7 +11,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
 use ai_memory_core::{
-    NewObservation, NewPage, NewSession, ObservationId, PageId, ProjectId, SessionId, WorkspaceId,
+    AgentKind, HandoffId, NewHandoff, NewObservation, NewPage, NewSession, ObservationId, PageId,
+    ProjectId, SessionId, WorkspaceId,
 };
 use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
@@ -47,6 +48,16 @@ pub(crate) enum WriteCmd {
     InsertObservation {
         obs: NewObservation,
         reply: oneshot::Sender<StoreResult<ObservationId>>,
+    },
+    InsertHandoff {
+        handoff: NewHandoff,
+        reply: oneshot::Sender<StoreResult<HandoffId>>,
+    },
+    AcceptHandoff {
+        handoff_id: HandoffId,
+        accepting_agent: AgentKind,
+        accepting_session: Option<SessionId>,
+        reply: oneshot::Sender<StoreResult<()>>,
     },
     Shutdown,
 }
@@ -161,6 +172,38 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Insert a new handoff in `open` state.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn insert_handoff(&self, handoff: NewHandoff) -> StoreResult<HandoffId> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::InsertHandoff { handoff, reply: tx })
+            .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
+    /// Mark a handoff accepted by the given agent / session.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] or propagates SQL errors.
+    pub async fn accept_handoff(
+        &self,
+        handoff_id: HandoffId,
+        accepting_agent: AgentKind,
+        accepting_session: Option<SessionId>,
+    ) -> StoreResult<()> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::AcceptHandoff {
+            handoff_id,
+            accepting_agent,
+            accepting_session,
+            reply: tx,
+        })
+        .await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Upsert a page (creating it or superseding the existing latest
     /// version when the body has changed).
     ///
@@ -231,6 +274,24 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
             }
             WriteCmd::InsertObservation { obs, reply } => {
                 let result = ops::insert_observation(&mut conn, &obs);
+                let _ = reply.send(result);
+            }
+            WriteCmd::InsertHandoff { handoff, reply } => {
+                let result = ops::insert_handoff(&mut conn, &handoff);
+                let _ = reply.send(result);
+            }
+            WriteCmd::AcceptHandoff {
+                handoff_id,
+                accepting_agent,
+                accepting_session,
+                reply,
+            } => {
+                let result = ops::accept_handoff(
+                    &mut conn,
+                    &handoff_id,
+                    accepting_agent,
+                    accepting_session.as_ref(),
+                );
                 let _ = reply.send(result);
             }
         }

@@ -5,8 +5,8 @@
 //! [`crate::writer`]).
 
 use ai_memory_core::{
-    AgentKind, NewObservation, NewPage, NewSession, ObservationId, ObservationKind, PageId,
-    SessionId,
+    AgentKind, HandoffId, NewHandoff, NewObservation, NewPage, NewSession, ObservationId,
+    ObservationKind, PageId, SessionId,
 };
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
@@ -255,6 +255,59 @@ pub fn insert_observation(
         ],
     )?;
     Ok(id)
+}
+
+/// Insert a new handoff in state=open.
+pub fn insert_handoff(conn: &mut Connection, h: &NewHandoff) -> StoreResult<HandoffId> {
+    let id = HandoffId::new();
+    let now = Timestamp::now().as_microsecond();
+    let open_q = serde_json::to_string(&h.open_questions)?;
+    let next_s = serde_json::to_string(&h.next_steps)?;
+    let files = serde_json::to_string(&h.files_touched)?;
+    let from_session: Option<&[u8]> = h.from_session_id.as_ref().map(|s| &s.as_bytes()[..]);
+    let cwd: Option<String> = h.cwd.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let from_agent = agent_kind_as_str(h.from_agent);
+    let to_agent = h.to_agent.map(agent_kind_as_str);
+    conn.execute(
+        "INSERT INTO handoffs \
+         (id, workspace_id, project_id, from_session_id, from_agent, to_agent, cwd, summary, \
+          open_questions, next_steps, files_touched, state, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 'open', ?12)",
+        params![
+            id.as_bytes(),
+            h.workspace_id.as_bytes(),
+            h.project_id.as_bytes(),
+            from_session,
+            from_agent,
+            to_agent,
+            cwd,
+            h.summary,
+            open_q,
+            next_s,
+            files,
+            now,
+        ],
+    )?;
+    Ok(id)
+}
+
+/// Mark a handoff accepted by `accepting_agent` / `accepting_session`.
+pub fn accept_handoff(
+    conn: &mut Connection,
+    handoff_id: &HandoffId,
+    accepting_agent: AgentKind,
+    accepting_session: Option<&SessionId>,
+) -> StoreResult<()> {
+    let now = Timestamp::now().as_microsecond();
+    let agent = agent_kind_as_str(accepting_agent);
+    let session: Option<&[u8]> = accepting_session.map(|s| &s.as_bytes()[..]);
+    conn.execute(
+        "UPDATE handoffs SET state = 'accepted', accepted_by = ?1, accepted_at = ?2, \
+         accepted_by_session = ?3 \
+         WHERE id = ?4 AND state = 'open'",
+        params![agent, now, session, handoff_id.as_bytes()],
+    )?;
+    Ok(())
 }
 
 fn agent_kind_as_str(kind: AgentKind) -> &'static str {

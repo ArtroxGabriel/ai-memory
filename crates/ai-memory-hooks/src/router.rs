@@ -10,7 +10,10 @@
 use std::str::FromStr;
 use std::sync::Arc;
 
-use ai_memory_core::{AgentKind, NewObservation, NewSession, ProjectId, SessionId, WorkspaceId};
+use ai_memory_core::{
+    AgentKind, NewHandoff, NewObservation, NewSession, ObservationKind, ProjectId, SessionId,
+    WorkspaceId,
+};
 use ai_memory_store::WriterHandle;
 use ai_memory_wiki::Wiki;
 use axum::Json;
@@ -115,7 +118,8 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
         warn!(error = %e, "log.md append failed");
     }
 
-    // On SessionEnd, synthesize the summary page and end the session.
+    // On SessionEnd, synthesize the summary page, end the session, and
+    // auto-create a handoff so the next agent can pick up.
     if matches!(env.event, HookEvent::SessionEnd) {
         let observations = state.reader.observations_for_session(session_id).await?;
         let new_page = synthesize_session_page(
@@ -124,8 +128,6 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
             session_id,
             &observations,
         );
-        // The wiki write_page method does the atomic file + store
-        // upsert in one go.
         let page_id = state
             .wiki
             .write_page(ai_memory_wiki::WritePageRequest {
@@ -139,10 +141,14 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
             })
             .await?;
         state.writer.end_session(session_id, Some(page_id)).await?;
+        let handoff =
+            build_auto_handoff(state, env.agent, session_id, env.cwd.clone(), &observations);
+        let handoff_id = state.writer.insert_handoff(handoff).await?;
         info!(
             session = %session_id,
             page = %new_page.path,
-            "session ended; synthesized summary page",
+            handoff = %handoff_id,
+            "session ended; summary page + open handoff created",
         );
     }
 
@@ -164,6 +170,65 @@ fn resolve_session_id(env: &HookEnvelope) -> anyhow::Result<SessionId> {
         return Ok(SessionId::new());
     }
     anyhow::bail!("hook payload missing session_id and event is not session-start")
+}
+
+fn build_auto_handoff(
+    state: &HookState,
+    from_agent: AgentKind,
+    session_id: SessionId,
+    cwd: Option<String>,
+    observations: &[ai_memory_core::Observation],
+) -> NewHandoff {
+    let mut prompts: Vec<&str> = Vec::new();
+    let mut tools: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+    for obs in observations {
+        match obs.kind {
+            ObservationKind::UserPrompt if !obs.title.is_empty() => prompts.push(&obs.title),
+            ObservationKind::PostToolUse | ObservationKind::PreToolUse if !obs.title.is_empty() => {
+                tools.insert(&obs.title);
+            }
+            _ => {}
+        }
+    }
+    let last_prompt = prompts.last().copied();
+    let summary = match (prompts.first().copied(), last_prompt) {
+        (Some(first), Some(last)) if first == last => format!("Session focused on: {first}"),
+        (Some(first), Some(last)) => format!("Started: {first}. Last: {last}."),
+        (Some(first), None) => format!("Started: {first}."),
+        _ => format!(
+            "Session ended; {} observations recorded.",
+            observations.len()
+        ),
+    };
+    let open_questions = if prompts.is_empty() {
+        Vec::new()
+    } else {
+        // Heuristic: last user prompt often *is* the open question.
+        vec![format!(
+            "Continue from: {}",
+            last_prompt.unwrap_or_default()
+        )]
+    };
+    let next_steps = if tools.is_empty() {
+        Vec::new()
+    } else {
+        vec![format!(
+            "Tools used: {}",
+            tools.into_iter().collect::<Vec<_>>().join(", ")
+        )]
+    };
+    NewHandoff {
+        workspace_id: state.workspace_id,
+        project_id: state.project_id,
+        from_session_id: Some(session_id),
+        from_agent,
+        to_agent: None,
+        cwd: cwd.map(std::path::PathBuf::from),
+        summary,
+        open_questions,
+        next_steps,
+        files_touched: Vec::new(),
+    }
 }
 
 const fn importance_for(event: HookEvent) -> u8 {

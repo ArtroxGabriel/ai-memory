@@ -1,6 +1,7 @@
 //! [`AiMemoryServer`] — the MCP server skeleton + tool router.
 
-use ai_memory_store::ReaderPool;
+use ai_memory_core::{AgentKind, NewHandoff, ProjectId, WorkspaceId};
+use ai_memory_store::{ReaderPool, WriterHandle};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
@@ -21,6 +22,9 @@ automatically via hooks and the watcher.";
 #[derive(Clone)]
 pub struct AiMemoryServer {
     reader: ReaderPool,
+    writer: WriterHandle,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
     default_limit: usize,
     // Read by the `#[tool_handler]` macro expansion; rustc's dead-code
     // analysis can't see that, so the lint must be allowed explicitly.
@@ -55,13 +59,48 @@ struct StatusResponse {
     counts: ai_memory_store::StatusCounts,
 }
 
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct HandoffBeginArgs {
+    /// Short prose summary of where the session left off.
+    summary: String,
+    /// Questions the next agent should resolve.
+    #[serde(default)]
+    open_questions: Vec<String>,
+    /// Suggested next steps.
+    #[serde(default)]
+    next_steps: Vec<String>,
+    /// Files touched during the session.
+    #[serde(default)]
+    files_touched: Vec<String>,
+    /// Working directory at the time of handoff. Used to match the
+    /// next agent's `memory_handoff_accept` call.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
+struct HandoffAcceptArgs {
+    /// Restrict the search to handoffs created for a specific cwd.
+    #[serde(default)]
+    cwd: Option<String>,
+}
+
 #[tool_router]
 impl AiMemoryServer {
-    /// Construct a server backed by the given reader pool.
+    /// Construct a server backed by the given reader/writer + 3-tuple
+    /// identity coordinates.
     #[must_use]
-    pub fn new(reader: ReaderPool) -> Self {
+    pub fn new(
+        reader: ReaderPool,
+        writer: WriterHandle,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+    ) -> Self {
         Self {
             reader,
+            writer,
+            workspace_id,
+            project_id,
             default_limit: 10,
             tool_router: Self::tool_router(),
         }
@@ -103,6 +142,61 @@ impl AiMemoryServer {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let response = QueryResponse { hits };
         ok_json(&response)
+    }
+
+    /// Create a handoff snapshot for the next agent CLI.
+    #[tool(description = "Record a cross-agent handoff snapshot. Call this \
+        before quitting one CLI so the next one (e.g. Codex picking up \
+        after Claude Code) can fetch context via memory_handoff_accept. \
+        Use cwd to scope the handoff to a specific working directory.")]
+    async fn memory_handoff_begin(
+        &self,
+        Parameters(args): Parameters<HandoffBeginArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let handoff = NewHandoff {
+            workspace_id: self.workspace_id,
+            project_id: self.project_id,
+            from_session_id: None,
+            from_agent: AgentKind::Other,
+            to_agent: None,
+            cwd: args.cwd.map(std::path::PathBuf::from),
+            summary: args.summary,
+            open_questions: args.open_questions,
+            next_steps: args.next_steps,
+            files_touched: args.files_touched,
+        };
+        let id = self
+            .writer
+            .insert_handoff(handoff)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        ok_json(&serde_json::json!({ "handoff_id": id.to_string() }))
+    }
+
+    /// Fetch the latest open handoff for this project (optionally filtered
+    /// by cwd) and mark it accepted.
+    #[tool(description = "Fetch the latest open handoff for this project \
+        and mark it accepted. Returns the summary + open questions + next \
+        steps so the agent can prepend them to the session context.")]
+    async fn memory_handoff_accept(
+        &self,
+        Parameters(args): Parameters<HandoffAcceptArgs>,
+    ) -> Result<CallToolResult, McpError> {
+        let handoff = self
+            .reader
+            .latest_open_handoff(self.workspace_id, self.project_id, args.cwd)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        match handoff {
+            None => ok_json(&serde_json::json!({ "handoff": null })),
+            Some(h) => {
+                self.writer
+                    .accept_handoff(h.id, AgentKind::Other, None)
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                ok_json(&serde_json::json!({ "handoff": h }))
+            }
+        }
     }
 
     /// Report aggregate counts (pages, sessions, observations).
@@ -150,7 +244,7 @@ mod tests {
     use ai_memory_store::Store;
     use tempfile::TempDir;
 
-    async fn setup_server() -> (TempDir, Store, AiMemoryServer) {
+    async fn setup_server() -> (TempDir, Store, AiMemoryServer, WorkspaceId, ProjectId) {
         let tmp = TempDir::new().unwrap();
         let store = Store::open(tmp.path()).unwrap();
         let ws = store
@@ -178,18 +272,18 @@ mod tests {
             .await
             .unwrap();
 
-        let server = AiMemoryServer::new(store.reader.clone());
-        (tmp, store, server)
+        let server = AiMemoryServer::new(store.reader.clone(), store.writer.clone(), ws, proj);
+        (tmp, store, server, ws, proj)
     }
 
     #[tokio::test]
     async fn server_constructs_with_tool_router() {
-        let (_tmp, _store, _server) = setup_server().await;
+        let (_tmp, _store, _server, _ws, _pj) = setup_server().await;
     }
 
     #[tokio::test]
     async fn memory_query_returns_hits_via_tool_method() {
-        let (_tmp, _store, server) = setup_server().await;
+        let (_tmp, _store, server, _ws, _pj) = setup_server().await;
         let result = server
             .memory_query(Parameters(QueryArgs {
                 query: "karpathy".into(),
@@ -206,7 +300,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_status_returns_counts() {
-        let (_tmp, _store, server) = setup_server().await;
+        let (_tmp, _store, server, _ws, _pj) = setup_server().await;
         let result = server.memory_status().await.unwrap();
         let text = result
             .content
@@ -219,7 +313,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_recent_returns_one_hit() {
-        let (_tmp, _store, server) = setup_server().await;
+        let (_tmp, _store, server, _ws, _pj) = setup_server().await;
         let result = server
             .memory_recent(Parameters(RecentArgs { limit: Some(5) }))
             .await
@@ -231,5 +325,58 @@ mod tests {
             .map(|t| t.text.clone())
             .unwrap();
         assert!(text.contains("foo.md"), "expected hit; got {text}");
+    }
+
+    #[tokio::test]
+    async fn handoff_begin_then_accept_round_trips() {
+        let (_tmp, _store, server, _ws, _pj) = setup_server().await;
+        let begin = server
+            .memory_handoff_begin(Parameters(HandoffBeginArgs {
+                summary: "left mid-refactor of writer actor".into(),
+                open_questions: vec!["what max channel size?".into()],
+                next_steps: vec!["finish supersession path".into()],
+                files_touched: vec!["crates/ai-memory-store/src/writer.rs".into()],
+                cwd: Some("/tmp/aim".into()),
+            }))
+            .await
+            .unwrap();
+        let begin_text = begin
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(begin_text.contains("handoff_id"));
+
+        // Accepting with matching cwd returns the handoff.
+        let accept = server
+            .memory_handoff_accept(Parameters(HandoffAcceptArgs {
+                cwd: Some("/tmp/aim".into()),
+            }))
+            .await
+            .unwrap();
+        let accept_text = accept
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(accept_text.contains("left mid-refactor"));
+        assert!(accept_text.contains("what max channel size?"));
+
+        // Second accept returns null (handoff is now accepted).
+        let again = server
+            .memory_handoff_accept(Parameters(HandoffAcceptArgs {
+                cwd: Some("/tmp/aim".into()),
+            }))
+            .await
+            .unwrap();
+        let again_text = again
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(again_text.contains("\"handoff\": null"));
     }
 }
