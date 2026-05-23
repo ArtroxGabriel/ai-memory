@@ -58,5 +58,6 @@ async fn main() -> Result<()> {
         Command::SetupAgent(args) => commands::setup_agent::run(&config, args),
         Command::Bootstrap(args) => commands::bootstrap::run(&config, args).await,
         Command::InstallInstructions(args) => commands::install_instructions::run(&config, args),
+        Command::Reorg(args) => commands::reorg::run(&config, args).await,
     }
 }

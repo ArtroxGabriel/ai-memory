@@ -6,8 +6,20 @@
 
 use ai_memory_core::{
     AgentKind, HandoffId, NewHandoff, NewObservation, NewPage, NewSession, ObservationId,
-    ObservationKind, PageId, SessionId,
+    ObservationKind, PageId, ProjectId, SessionId,
 };
+
+/// Summary returned by [`reorg_sessions`] and exposed via
+/// [`crate::writer::WriterHandle::reorg_sessions`].
+#[derive(Debug, Default, Clone)]
+pub struct ReorgSummary {
+    /// Sessions whose `project_id` was changed.
+    pub sessions_moved: usize,
+    /// Observations updated to match their session's new project.
+    pub observations_updated: usize,
+    /// `is_latest=1` pages marked `is_latest=0` (mash-up graveyard).
+    pub pages_graveyarded: usize,
+}
 use jiff::Timestamp;
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -563,6 +575,50 @@ fn audit(
         ],
     )?;
     Ok(())
+}
+
+/// Retro-fit sessions + observations to per-cwd projects and graveyard
+/// any `is_latest=1` pages (which are mash-ups across the old single-project
+/// bucket). Executes atomically in one transaction.
+///
+/// `plan` contains `(session_id, new_project_id)` pairs. Sessions not in
+/// the plan are left untouched. Pages are graveyarded unconditionally so a
+/// fresh consolidation can regenerate clean per-project pages.
+pub fn reorg_sessions(
+    conn: &mut Connection,
+    plan: &[(SessionId, ProjectId)],
+) -> StoreResult<ReorgSummary> {
+    if plan.is_empty() {
+        return Ok(ReorgSummary::default());
+    }
+    let tx = conn.transaction()?;
+    let mut sessions_moved = 0usize;
+    let mut observations_updated = 0usize;
+    for (session_id, new_project_id) in plan {
+        let rows = tx.execute(
+            "UPDATE sessions SET project_id = ?1 WHERE id = ?2 AND project_id != ?1",
+            params![new_project_id.as_bytes(), session_id.as_bytes()],
+        )?;
+        sessions_moved += rows;
+        // Update observations whose session_id matches, keeping project_id
+        // in sync with the session row we just moved.
+        let obs_rows = tx.execute(
+            "UPDATE observations SET project_id = ?1 WHERE session_id = ?2",
+            params![new_project_id.as_bytes(), session_id.as_bytes()],
+        )?;
+        observations_updated += obs_rows;
+    }
+    // Graveyard all current latest pages — they mixed observations from
+    // multiple projects and must be regenerated per-project by the next
+    // consolidation pass.
+    let pages_graveyarded: usize =
+        tx.execute("UPDATE pages SET is_latest = 0 WHERE is_latest = 1", [])?;
+    tx.commit()?;
+    Ok(ReorgSummary {
+        sessions_moved,
+        observations_updated,
+        pages_graveyarded,
+    })
 }
 
 #[cfg(test)]

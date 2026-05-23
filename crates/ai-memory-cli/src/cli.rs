@@ -80,6 +80,19 @@ pub enum Command {
     /// `<!-- ai-memory:end -->` markers so re-running replaces the
     /// block in place without duplicating.
     InstallInstructions(InstallInstructionsArgs),
+    /// Retro-fit existing sessions + observations to per-cwd projects
+    /// based on the cwd captured at session-start. Pages are marked
+    /// `is_latest=false` (they were a multi-project mash-up) so the
+    /// next consolidation can regenerate them per-project. Idempotent.
+    Reorg(ReorgArgs),
+}
+
+/// Arguments for `reorg`.
+#[derive(Debug, Args)]
+pub struct ReorgArgs {
+    /// Show what would change without writing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// Arguments for `install-instructions`.

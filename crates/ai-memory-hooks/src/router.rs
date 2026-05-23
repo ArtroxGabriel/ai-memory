@@ -7,6 +7,7 @@
 //! background-task-indexing-after-return, basic-memory #763). The agent
 //! never blocks on us thanks to the fire-and-forget client side.
 
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -35,9 +36,9 @@ use crate::synth::synthesize_session_page;
 /// Shared state passed to the hook handler.
 #[derive(Clone)]
 pub struct HookState {
-    /// Workspace these observations belong to.
+    /// Default workspace to use when a hook event lacks a `cwd` field.
     pub workspace_id: WorkspaceId,
-    /// Project these observations belong to.
+    /// Default project to use when a hook event lacks a `cwd` field.
     pub project_id: ProjectId,
     /// Writer actor handle.
     pub writer: WriterHandle,
@@ -54,6 +55,11 @@ pub struct HookState {
     /// the store. Same handle is also held by the wiki and consolidator
     /// so scrubbing happens at every write boundary.
     pub sanitizer: Sanitizer,
+    /// Cache of `cwd → (workspace_id, project_id)` resolved on first
+    /// sight. Avoids a SQLite round-trip for every hook event from the
+    /// same agent session. Keyed by the raw cwd string; no
+    /// canonicalisation — two symlinked paths are separate buckets.
+    pub project_cache: Arc<tokio::sync::Mutex<HashMap<String, (WorkspaceId, ProjectId)>>>,
 }
 
 /// Build a router with `POST /hook` (event ingress) and `GET /handoff`
@@ -115,9 +121,10 @@ async fn fetch_and_accept_handoff(
     query: HandoffQuery,
 ) -> anyhow::Result<Option<String>> {
     let agent = query.agent.as_deref().map_or(AgentKind::Other, parse_agent);
+    let (ws, proj) = resolve_project_ids(state, query.cwd.as_deref()).await?;
     let handoff = state
         .reader
-        .latest_open_handoff(state.workspace_id, state.project_id, query.cwd)
+        .latest_open_handoff(ws, proj, query.cwd)
         .await?;
     let Some(h) = handoff else {
         return Ok(None);
@@ -188,6 +195,52 @@ fn render_handoff_markdown(h: &Handoff) -> String {
     buf
 }
 
+/// Resolve the `(workspace_id, project_id)` pair for a hook event.
+///
+/// When `cwd` is present, derives `project_name = basename(cwd)` and
+/// upserts it under the `default` workspace (cached to avoid a SQLite
+/// round-trip per event). Falls back to the server's default IDs when
+/// `cwd` is `None` or empty.
+async fn resolve_project_ids(
+    state: &HookState,
+    cwd: Option<&str>,
+) -> anyhow::Result<(WorkspaceId, ProjectId)> {
+    let Some(cwd) = cwd.filter(|s| !s.is_empty()) else {
+        return Ok((state.workspace_id, state.project_id));
+    };
+    {
+        let cache = state.project_cache.lock().await;
+        if let Some(ids) = cache.get(cwd) {
+            return Ok(*ids);
+        }
+    }
+    let project_name = std::path::Path::new(cwd)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .map(str::to_string)
+        .filter(|s| !s.is_empty())
+        // Defensive: if basename derivation fails (e.g. cwd is "/"),
+        // fall back to the server defaults rather than hard-erroring.
+        .ok_or_else(|| anyhow::anyhow!("could not derive project name from cwd {cwd:?}"))?;
+    let ws = state
+        .writer
+        .get_or_create_workspace("default".to_string())
+        .await
+        .map_err(|e| anyhow::anyhow!("get_or_create_workspace: {e}"))?;
+    let proj = state
+        .writer
+        .get_or_create_project(ws, project_name, Some(cwd.to_string()))
+        .await
+        .map_err(|e| anyhow::anyhow!("get_or_create_project: {e}"))?;
+    let ids = (ws, proj);
+    state
+        .project_cache
+        .lock()
+        .await
+        .insert(cwd.to_string(), ids);
+    Ok(ids)
+}
+
 async fn process_envelope(state: Arc<HookState>, env: HookEnvelope) {
     if let Err(e) = process(&state, env).await {
         warn!(error = %e, "hook processing failed");
@@ -196,14 +249,15 @@ async fn process_envelope(state: Arc<HookState>, env: HookEnvelope) {
 
 async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
     let session_id = resolve_session_id(&env)?;
+    let (ws, proj) = resolve_project_ids(state, env.cwd.as_deref()).await?;
 
     // Begin the session row if SessionStart, otherwise no-op (the
     // `INSERT OR IGNORE` makes this safe).
     if matches!(env.event, HookEvent::SessionStart) {
         let new_session = NewSession {
             id: session_id,
-            workspace_id: state.workspace_id,
-            project_id: state.project_id,
+            workspace_id: ws,
+            project_id: proj,
             agent_kind: env.agent,
             cwd: env.cwd.as_ref().map(std::path::PathBuf::from),
         };
@@ -219,8 +273,8 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
     let body = env.body_excerpt.clone().unwrap_or_default();
     let raw_obs = NewObservation {
         session_id,
-        workspace_id: state.workspace_id,
-        project_id: state.project_id,
+        workspace_id: ws,
+        project_id: proj,
         kind,
         title,
         body,
@@ -247,7 +301,7 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
     // of context. Does NOT end the session and does NOT create a
     // handoff. The eventual SessionEnd supersedes this page.
     if matches!(env.event, HookEvent::PreCompact)
-        && let Err(e) = consolidate_or_synth(state, session_id).await
+        && let Err(e) = consolidate_or_synth(state, session_id, ws, proj).await
     {
         warn!(error = %e, "PreCompact consolidation failed; continuing");
     }
@@ -256,12 +310,7 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
     // auto-create a handoff so the next agent can pick up.
     if matches!(env.event, HookEvent::SessionEnd) {
         let observations = state.reader.observations_for_session(session_id).await?;
-        let new_page = synthesize_session_page(
-            state.workspace_id,
-            state.project_id,
-            session_id,
-            &observations,
-        );
+        let new_page = synthesize_session_page(ws, proj, session_id, &observations);
         let page_id = state
             .wiki
             .write_page(ai_memory_wiki::WritePageRequest {
@@ -276,8 +325,14 @@ async fn process(state: &HookState, env: HookEnvelope) -> anyhow::Result<()> {
             })
             .await?;
         state.writer.end_session(session_id, Some(page_id)).await?;
-        let handoff =
-            build_auto_handoff(state, env.agent, session_id, env.cwd.clone(), &observations);
+        let handoff = build_auto_handoff(
+            ws,
+            proj,
+            env.agent,
+            session_id,
+            env.cwd.clone(),
+            &observations,
+        );
         let handoff_id = state.writer.insert_handoff(handoff).await?;
         // Auto-commit the wiki tree so the session/handoff/log.md
         // changes land in git in one atomic snapshot.
@@ -320,7 +375,8 @@ fn resolve_session_id(env: &HookEnvelope) -> anyhow::Result<SessionId> {
 }
 
 fn build_auto_handoff(
-    state: &HookState,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
     from_agent: AgentKind,
     session_id: SessionId,
     cwd: Option<String>,
@@ -390,8 +446,8 @@ fn build_auto_handoff(
         )]
     };
     NewHandoff {
-        workspace_id: state.workspace_id,
-        project_id: state.project_id,
+        workspace_id,
+        project_id,
         from_session_id: Some(session_id),
         from_agent,
         to_agent: None,
@@ -406,7 +462,12 @@ fn build_auto_handoff(
 /// Write a fresh `sessions/<id>.md` for the current session without
 /// ending it. Used by the PreCompact branch to checkpoint state before
 /// the agent's working context collapses.
-async fn consolidate_or_synth(state: &HookState, session_id: SessionId) -> anyhow::Result<()> {
+async fn consolidate_or_synth(
+    state: &HookState,
+    session_id: SessionId,
+    workspace_id: WorkspaceId,
+    project_id: ProjectId,
+) -> anyhow::Result<()> {
     if let Some(c) = state.consolidator.as_ref() {
         let outcome = c.consolidate_session(session_id, false).await?;
         debug!(
@@ -424,12 +485,7 @@ async fn consolidate_or_synth(state: &HookState, session_id: SessionId) -> anyho
     if observations.is_empty() {
         return Ok(());
     }
-    let new_page = synthesize_session_page(
-        state.workspace_id,
-        state.project_id,
-        session_id,
-        &observations,
-    );
+    let new_page = synthesize_session_page(workspace_id, project_id, session_id, &observations);
     state
         .wiki
         .write_page(ai_memory_wiki::WritePageRequest {
@@ -462,5 +518,149 @@ const fn importance_for(event: HookEvent) -> u8 {
         HookEvent::PostToolUse | HookEvent::PreToolUse => 5,
         HookEvent::Stop | HookEvent::PreCompact => 6,
         HookEvent::Notification | HookEvent::Other => 3,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use ai_memory_core::Sanitizer;
+    use ai_memory_store::Store;
+    use ai_memory_wiki::Wiki;
+    use tempfile::TempDir;
+
+    use super::*;
+    use crate::payload::HookQuery;
+
+    /// Build a minimal `HookState` backed by a real on-disk store.
+    async fn make_state(tmp: &TempDir) -> HookState {
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "scratch", None)
+            .await
+            .unwrap();
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let sanitizer = Sanitizer::default();
+        HookState {
+            workspace_id: ws,
+            project_id: proj,
+            writer: store.writer.clone(),
+            reader: store.reader.clone(),
+            wiki,
+            consolidator: None,
+            sanitizer,
+            project_cache: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Two hook events with distinct cwds must land in two distinct projects.
+    #[tokio::test]
+    async fn process_with_cwd_creates_new_project() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+
+        // Event from /home/user/project-alpha.
+        let (ws_a, proj_a) = resolve_project_ids(&state, Some("/home/user/project-alpha"))
+            .await
+            .unwrap();
+        // Event from /home/user/project-beta.
+        let (ws_b, proj_b) = resolve_project_ids(&state, Some("/home/user/project-beta"))
+            .await
+            .unwrap();
+
+        // Projects must be distinct; workspace is the same (`default`).
+        assert_ne!(proj_a, proj_b, "different cwds → different projects");
+        assert_eq!(ws_a, ws_b, "same default workspace");
+
+        // Neither should match the server-default scratch project.
+        assert_ne!(proj_a, state.project_id);
+        assert_ne!(proj_b, state.project_id);
+    }
+
+    /// An event without a cwd must fall back to the server defaults.
+    #[tokio::test]
+    async fn process_with_missing_cwd_falls_back_to_state_defaults() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+
+        let (ws, proj) = resolve_project_ids(&state, None).await.unwrap();
+        assert_eq!(ws, state.workspace_id);
+        assert_eq!(proj, state.project_id);
+
+        // Likewise for an empty string.
+        let (ws2, proj2) = resolve_project_ids(&state, Some("")).await.unwrap();
+        assert_eq!(ws2, state.workspace_id);
+        assert_eq!(proj2, state.project_id);
+    }
+
+    /// A second call for the same cwd must hit the in-memory cache — no
+    /// additional `get_or_create_project` writes happen, proven by
+    /// inspecting the cache after both calls.
+    #[tokio::test]
+    async fn project_cache_hits_on_second_event() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+
+        let cwd = "/home/user/cached-project";
+
+        // First call — populates the cache.
+        let (_, proj_first) = resolve_project_ids(&state, Some(cwd)).await.unwrap();
+
+        // Inspect the cache: should have exactly one entry.
+        {
+            let cache = state.project_cache.lock().await;
+            assert_eq!(cache.len(), 1, "cache has one entry after first call");
+            assert!(cache.contains_key(cwd), "cache keyed by raw cwd");
+        }
+
+        // Second call — must return the same IDs from the cache.
+        let (_, proj_second) = resolve_project_ids(&state, Some(cwd)).await.unwrap();
+        assert_eq!(proj_first, proj_second, "cache must return identical IDs");
+
+        // Cache must still have exactly one entry (no duplicate insert).
+        {
+            let cache = state.project_cache.lock().await;
+            assert_eq!(cache.len(), 1, "no duplicate cache entries");
+        }
+    }
+
+    /// A hook event fires end-to-end through `process`. Validates that
+    /// the session + observation rows land in the resolved project, not
+    /// the server-default scratch project.
+    #[tokio::test]
+    async fn process_routes_observation_to_cwd_project() {
+        let tmp = TempDir::new().unwrap();
+        let state = make_state(&tmp).await;
+
+        let env = HookEnvelope::from_query_and_body(
+            HookQuery {
+                event: "session-start".into(),
+                agent: Some("claude-code".into()),
+            },
+            serde_json::json!({
+                "session_id": "test-session-cwd-routing",
+                "cwd": "/home/user/my-project",
+            }),
+        );
+
+        process(&state, env).await.unwrap();
+
+        // The observation must be in the project derived from the cwd,
+        // not in the server-default `scratch` project.
+        let (_, expected_proj) = resolve_project_ids(&state, Some("/home/user/my-project"))
+            .await
+            .unwrap();
+        assert_ne!(
+            expected_proj, state.project_id,
+            "routing must not use server-default project"
+        );
     }
 }

@@ -18,7 +18,7 @@ use rusqlite::Connection;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::error::{StoreError, StoreResult};
-use crate::ops;
+use crate::ops::{self, ReorgSummary};
 
 /// Commands accepted by the writer thread.
 pub(crate) enum WriteCmd {
@@ -62,6 +62,13 @@ pub(crate) enum WriteCmd {
         accepting_agent: AgentKind,
         accepting_session: Option<SessionId>,
         reply: oneshot::Sender<StoreResult<()>>,
+    },
+    /// Retro-fit sessions + observations to per-cwd projects and graveyard
+    /// mash-up pages. Executed in one transaction for atomicity.
+    Reorg {
+        /// Each entry is `(session_id, new_project_id)`.
+        plan: Vec<(SessionId, ProjectId)>,
+        reply: oneshot::Sender<StoreResult<ReorgSummary>>,
     },
     BumpAccess {
         page_ids: Vec<PageId>,
@@ -296,6 +303,23 @@ impl WriterHandle {
         rx.await.map_err(|_| StoreError::WriterClosed)?
     }
 
+    /// Retro-fit sessions and their observations to per-cwd projects and
+    /// graveyard any mash-up pages. The `plan` slice contains
+    /// `(session_id, new_project_id)` pairs. Everything runs in one
+    /// SQLite transaction — either fully committed or fully rolled back.
+    ///
+    /// # Errors
+    /// Returns [`StoreError::WriterClosed`] if the actor has shut down, or
+    /// propagates the SQL error from the reorg transaction.
+    pub async fn reorg_sessions(
+        &self,
+        plan: Vec<(SessionId, ProjectId)>,
+    ) -> StoreResult<ReorgSummary> {
+        let (tx, rx) = oneshot::channel();
+        self.send(WriteCmd::Reorg { plan, reply: tx }).await?;
+        rx.await.map_err(|_| StoreError::WriterClosed)?
+    }
+
     /// Upsert a batch of pages atomically (one SQL transaction).
     ///
     /// # Errors
@@ -416,6 +440,10 @@ fn worker_loop(mut conn: Connection, mut rx: mpsc::Receiver<WriteCmd>) {
                     accepting_session.as_ref(),
                 );
                 send_or_warn(reply, result, "accept_handoff");
+            }
+            WriteCmd::Reorg { plan, reply } => {
+                let result = ops::reorg_sessions(&mut conn, &plan);
+                send_or_warn(reply, result, "reorg_sessions");
             }
             WriteCmd::BumpAccess { page_ids, reply } => {
                 let result = ops::bump_access_for_pages(&mut conn, &page_ids);

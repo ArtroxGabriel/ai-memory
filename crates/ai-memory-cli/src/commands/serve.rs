@@ -168,6 +168,9 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 wiki: wiki.clone(),
                 consolidator: consolidator.clone(),
                 sanitizer: sanitizer.clone(),
+                project_cache: std::sync::Arc::new(tokio::sync::Mutex::new(
+                    std::collections::HashMap::new(),
+                )),
             });
             // Build the auth state. Precedence (highest first):
             //   1. AI_MEMORY_AUTH_TOKEN env var
