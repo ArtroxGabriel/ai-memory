@@ -213,6 +213,10 @@ struct HandoffBeginArgs {
     /// next agent's `memory_handoff_accept` call.
     #[serde(default)]
     cwd: Option<String>,
+    /// Project to scope the handoff to. Omit to target the project you're
+    /// currently working in (resolved from recent hook activity).
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -220,6 +224,10 @@ struct HandoffAcceptArgs {
     /// Restrict the search to handoffs created for a specific cwd.
     #[serde(default)]
     cwd: Option<String>,
+    /// Project to accept a handoff from. Omit to target the project you're
+    /// currently working in (resolved from recent hook activity).
+    #[serde(default)]
+    project: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -602,9 +610,10 @@ impl AiMemoryServer {
         // path-pattern regexes already cover when applicable, but we
         // pass each entry through anyway as defence-in-depth.
         let s = &self.sanitizer;
+        let (ws, proj) = self.effective_ids(args.project.as_deref()).await;
         let handoff = NewHandoff {
-            workspace_id: self.workspace_id,
-            project_id: self.project_id,
+            workspace_id: ws,
+            project_id: proj,
             from_session_id: None,
             from_agent: AgentKind::Other,
             to_agent: None,
@@ -645,9 +654,10 @@ impl AiMemoryServer {
         &self,
         Parameters(args): Parameters<HandoffAcceptArgs>,
     ) -> Result<CallToolResult, McpError> {
+        let (ws, proj) = self.effective_ids(args.project.as_deref()).await;
         let handoff = self
             .reader
-            .latest_open_handoff(self.workspace_id, self.project_id, args.cwd)
+            .latest_open_handoff(ws, proj, args.cwd)
             .await
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         match handoff {
@@ -1246,6 +1256,50 @@ mod tests {
         assert!(text.contains("foo.md"), "expected hit; got {text}");
     }
 
+    /// `memory_handoff_begin` must resolve the same project as
+    /// `memory_briefing` when hooks publish `ActiveProject` (issue #2).
+    #[tokio::test]
+    async fn handoff_begin_pending_count_matches_briefing_active_project() {
+        let (_tmp, store, mut server, ws, baked) = setup_server().await;
+        let active = store
+            .writer
+            .get_or_create_project(ws, "ai-memory", Some(r"C:\GIT\ai-memory".into()))
+            .await
+            .unwrap();
+        assert_ne!(active, baked, "test needs baked default != active project");
+        server.active_project.set(ws, active);
+
+        server
+            .memory_handoff_begin(Parameters(HandoffBeginArgs {
+                summary: "fix omp CHECK".into(),
+                open_questions: vec![],
+                next_steps: vec![],
+                files_touched: vec![],
+                cwd: Some(r"C:\GIT\ai-memory".into()),
+                project: None,
+            }))
+            .await
+            .unwrap();
+
+        let briefing = server
+            .memory_briefing(Parameters(BriefingArgs {
+                recent_pages_limit: Some(5),
+                project: None,
+            }))
+            .await
+            .unwrap();
+        let text = briefing
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.clone())
+            .unwrap();
+        assert!(
+            text.contains("\"pending_handoff_count\": 1"),
+            "briefing should see the handoff in the active project; got {text}",
+        );
+    }
+
     #[tokio::test]
     async fn handoff_begin_then_accept_round_trips() {
         let (_tmp, _store, server, _ws, _pj) = setup_server().await;
@@ -1256,6 +1310,7 @@ mod tests {
                 next_steps: vec!["finish supersession path".into()],
                 files_touched: vec!["crates/ai-memory-store/src/writer.rs".into()],
                 cwd: Some("/tmp/aim".into()),
+                project: None,
             }))
             .await
             .unwrap();
@@ -1271,6 +1326,7 @@ mod tests {
         let accept = server
             .memory_handoff_accept(Parameters(HandoffAcceptArgs {
                 cwd: Some("/tmp/aim".into()),
+                project: None,
             }))
             .await
             .unwrap();
@@ -1287,6 +1343,7 @@ mod tests {
         let again = server
             .memory_handoff_accept(Parameters(HandoffAcceptArgs {
                 cwd: Some("/tmp/aim".into()),
+                project: None,
             }))
             .await
             .unwrap();
@@ -1355,7 +1412,10 @@ mod tests {
     async fn memory_handoff_accept_when_none_pending_returns_null() {
         let (_tmp, _store, server, _ws, _pj) = setup_server().await;
         let result = server
-            .memory_handoff_accept(Parameters(HandoffAcceptArgs { cwd: None }))
+            .memory_handoff_accept(Parameters(HandoffAcceptArgs {
+                cwd: None,
+                project: None,
+            }))
             .await
             .expect("empty-queue must be Ok, not Err");
         let text = result

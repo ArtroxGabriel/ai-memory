@@ -23,6 +23,7 @@ use serde::Serialize;
 // for a single use-site.
 
 use crate::error::{StoreError, StoreResult};
+use crate::fts_query::prepare_fts5_query;
 
 /// One hit returned by [`ReaderPool::search_pages`].
 #[derive(Debug, Clone, Serialize)]
@@ -308,7 +309,10 @@ impl ReaderPool {
     /// # Errors
     /// Propagates any SQL or pool error.
     pub async fn search_pages(&self, query: String, limit: usize) -> StoreResult<Vec<PageHit>> {
-        let query = normalize_fts_query(&query);
+        let fts_query = normalize_fts_query(&query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT pages.id, pages.path, pages.title, \
@@ -321,7 +325,7 @@ impl ReaderPool {
                  LIMIT ?2",
             )?;
             #[allow(clippy::cast_possible_wrap)]
-            let rows = stmt.query_map(params![query, limit as i64], |row| {
+            let rows = stmt.query_map(params![fts_query, limit as i64], |row| {
                 let id_bytes: Vec<u8> = row.get(0)?;
                 let path: String = row.get(1)?;
                 let title: String = row.get(2)?;
@@ -410,7 +414,10 @@ impl ReaderPool {
         query: String,
         limit: usize,
     ) -> StoreResult<Vec<PageHit>> {
-        let query = normalize_fts_query(&query);
+        let fts_query = normalize_fts_query(&query);
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
         self.with_conn(move |conn| {
             let mut stmt = conn.prepare_cached(
                 "SELECT pages.id, pages.path, pages.title, \
@@ -428,7 +435,7 @@ impl ReaderPool {
             #[allow(clippy::cast_possible_wrap)]
             let rows = stmt.query_map(
                 params![
-                    query,
+                    fts_query,
                     workspace_id.as_bytes(),
                     project_id.as_bytes(),
                     limit as i64
@@ -2207,21 +2214,9 @@ fn count_project(
 }
 
 fn normalize_fts_query(query: &str) -> String {
-    query
-        .split_whitespace()
-        .map(|token| {
-            if should_quote_fts_token(token) {
-                format!("\"{}\"", token.replace('"', "\"\""))
-            } else {
-                token.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-fn should_quote_fts_token(token: &str) -> bool {
-    token.contains('-') && !(token.starts_with('"') && token.ends_with('"'))
+    // Delegates to prepare_fts5_query: neutralises `word:` column syntax and
+    // quotes tokens so `-` / `*` are not FTS5 operators.
+    prepare_fts5_query(query)
 }
 
 /// Count rows in a time-bounded window. Used by [`ReaderPool::briefing`]

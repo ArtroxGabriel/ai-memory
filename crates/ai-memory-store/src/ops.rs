@@ -1031,6 +1031,34 @@ mod tests {
         assert!(second.is_ok(), "double-accept must not error");
     }
 
+    /// Pi / OMP hooks persist `agent_kind = 'omp'`. V01's CHECK omitted
+    /// that value; regression for the hook-router WARN on every event.
+    #[test]
+    fn begin_session_accepts_omp_agent_kind() {
+        let (_tmp, mut conn, ws, proj) = fresh_db();
+        let sid = SessionId::new();
+        begin_session(
+            &mut conn,
+            &NewSession {
+                id: sid,
+                workspace_id: ws,
+                project_id: proj,
+                agent_kind: AgentKind::Omp,
+                cwd: Some(std::path::PathBuf::from(r"C:\GIT\ai-memory")),
+            },
+        )
+        .unwrap();
+
+        let stored: String = conn
+            .query_row(
+                "SELECT agent_kind FROM sessions WHERE id = ?1",
+                params![&sid.as_bytes()[..]],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, "omp");
+    }
+
     /// end_session links the synthesised summary page so callers can
     /// jump straight from session row to summary.
     #[test]

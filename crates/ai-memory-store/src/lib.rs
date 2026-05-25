@@ -14,10 +14,13 @@ use rusqlite::Connection;
 
 pub mod decay;
 mod error;
+mod fts_query;
 mod migrations;
 mod ops;
 mod reader;
 mod writer;
+
+pub use fts_query::prepare_fts5_query;
 
 pub use decay::{DecayParams, retention_score};
 pub use error::{StoreError, StoreResult};
@@ -307,6 +310,44 @@ mod tests {
             hits[0].snippet.contains("different"),
             "snippet should come from the latest version, got: {}",
             hits[0].snippet
+        );
+    }
+
+    /// Regression: bare `word:` in agent queries is FTS5 column syntax, not
+    /// a literal token (`no such column: pick` / `memory`).
+    #[tokio::test]
+    async fn search_colon_tokens_do_not_error() {
+        let tmp = TempDir::new().unwrap();
+        let store = Store::open(tmp.path()).unwrap();
+        let ws = store
+            .writer
+            .get_or_create_workspace("default")
+            .await
+            .unwrap();
+        let proj = store
+            .writer
+            .get_or_create_project(ws, "scratch", None)
+            .await
+            .unwrap();
+        store
+            .writer
+            .upsert_page(sample_page(
+                ws,
+                proj,
+                "handoff.md",
+                "pick up handoff context from ai-memory bootstrap",
+            ))
+            .await
+            .unwrap();
+
+        let hits = store
+            .reader
+            .search_pages("pick: handoff bootstrap".into(), 10)
+            .await
+            .unwrap();
+        assert!(
+            !hits.is_empty(),
+            "colon-sanitized query should match without SQLite column error"
         );
     }
 
