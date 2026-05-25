@@ -55,6 +55,7 @@ pub fn run(config: &Config, args: InstallMcpArgs) -> Result<()> {
         McpClient::GeminiCli => render_gemini_cli(&args)?,
         McpClient::Openclaw => render_openclaw(&args)?,
         McpClient::Pi => render_pi(&args)?,
+        McpClient::AntigravityCli => render_antigravity_cli(&args)?,
     };
     println!("{snippet}");
     Ok(())
@@ -108,6 +109,10 @@ fn resolve_config_file(args: &InstallMcpArgs) -> Result<PathBuf> {
         McpClient::GeminiCli => home.join(".gemini").join("settings.json"),
         McpClient::Openclaw => home.join(".openclaw").join("config.json"),
         McpClient::Pi => home.join(".omp").join("agent").join("mcp.json"),
+        McpClient::AntigravityCli => home
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("mcp_config.json"),
     })
 }
 
@@ -142,7 +147,8 @@ fn json_mcp_location(client: McpClient) -> Option<JsonMcpLocation> {
         | McpClient::ClaudeDesktop
         | McpClient::Cursor
         | McpClient::GeminiCli
-        | McpClient::Pi => Some(JsonMcpLocation::RootMcpServers),
+        | McpClient::Pi
+        | McpClient::AntigravityCli => Some(JsonMcpLocation::RootMcpServers),
         McpClient::OpenCode => Some(JsonMcpLocation::RootMcp),
         McpClient::Openclaw => Some(JsonMcpLocation::NestedMcpServers),
         McpClient::Codex => None,
@@ -257,6 +263,13 @@ fn build_mcp_entry(args: &InstallMcpArgs) -> Result<serde_json::Value> {
             entry.insert("type".into(), json!("http"));
             entry.insert("url".into(), json!(args.server_url));
             entry.insert("enabled".into(), json!(true));
+            if let Some(b) = &bearer {
+                entry.insert("headers".into(), json!({"Authorization": b}));
+            }
+        }
+        McpClient::AntigravityCli => {
+            entry.insert("serverUrl".into(), json!(args.server_url));
+            entry.insert("timeout".into(), json!(GEMINI_MCP_TIMEOUT_MS));
             if let Some(b) = &bearer {
                 entry.insert("headers".into(), json!({"Authorization": b}));
             }
@@ -528,6 +541,17 @@ fn render_pi(args: &InstallMcpArgs) -> Result<String> {
     ))
 }
 
+fn render_antigravity_cli(args: &InstallMcpArgs) -> Result<String> {
+    Ok(format!(
+        "# Antigravity CLI (`agy`) — merge into ~/.gemini/antigravity-cli/mcp_config.json:\n\
+         #\n\
+         # Antigravity CLI uses `serverUrl` (not `url` or `httpUrl`) for\n\
+         # streamable-HTTP endpoints. The `timeout` is in milliseconds.\n\
+         {snippet}\n",
+        snippet = render_json_mcp_fragment(args)?,
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -565,6 +589,7 @@ mod tests {
             McpClient::GeminiCli => render_gemini_cli(&args).unwrap(),
             McpClient::Openclaw => render_openclaw(&args).unwrap(),
             McpClient::Pi => render_pi(&args).unwrap(),
+            McpClient::AntigravityCli => render_antigravity_cli(&args).unwrap(),
         }
     }
 
@@ -581,6 +606,7 @@ mod tests {
             McpClient::GeminiCli,
             McpClient::Openclaw,
             McpClient::Pi,
+            McpClient::AntigravityCli,
         ] {
             let out = render_with_token(client);
             // Every client embeds the token as `Authorization:
@@ -611,6 +637,7 @@ mod tests {
             McpClient::GeminiCli,
             McpClient::Openclaw,
             McpClient::Pi,
+            McpClient::AntigravityCli,
         ] {
             let out = render_for_test(client);
             assert!(
@@ -631,6 +658,7 @@ mod tests {
             McpClient::GeminiCli => render_gemini_cli(&args).unwrap(),
             McpClient::Openclaw => render_openclaw(&args).unwrap(),
             McpClient::Pi => render_pi(&args).unwrap(),
+            McpClient::AntigravityCli => render_antigravity_cli(&args).unwrap(),
         }
     }
 
@@ -646,6 +674,7 @@ mod tests {
         assert!(render_for_test(McpClient::Openclaw).contains("\"streamable-http\""));
         assert!(render_for_test(McpClient::Codex).contains("[mcp_servers.ai-memory]"));
         assert!(render_for_test(McpClient::Pi).contains("~/.omp/agent/mcp.json"));
+        assert!(render_for_test(McpClient::AntigravityCli).contains("\"serverUrl\""));
     }
 
     /// The Codex apply path must emit block-form `[mcp_servers.<name>]`

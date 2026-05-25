@@ -30,6 +30,7 @@
 | Oh My Pi / OMP | Supported | `pi` / `omp` aliases for MCP config + TypeScript extension. |
 | Claude Desktop | MCP-only | Uses `mcp-remote`; no lifecycle hooks. |
 | OpenClaw | Supported | MCP config + native plugin lifecycle hooks. |
+| Antigravity CLI | Supported | MCP config (`serverUrl`) + lifecycle hooks. |
 | LLM providers | Supported | Anthropic, OpenAI, Gemini, and OpenAI-compatible endpoints. |
 | Embedding providers | Supported | OpenAI and Voyage. |
 
@@ -72,7 +73,7 @@ priors are at the [bottom](#influences-and-prior-art).
   mode. Mounted on the same axum server as MCP.
 - **Multi-agent + multi-machine ready.** Supported clients: Claude
   Code, Codex, OpenCode, Cursor, Claude Desktop (via `mcp-remote`),
-  Gemini CLI, OpenClaw, and Oh My Pi / OMP (`pi` / `omp` aliases).
+  Gemini CLI, Antigravity CLI, OpenClaw, and Oh My Pi / OMP (`pi` / `omp` aliases).
   Server runs local (loopback) OR on a homelab box (LAN/VPN/cloud)
   with bearer-token auth.
 - **Thin-client CLI.** `ai-memory bootstrap`, `purge-project`,
@@ -115,7 +116,7 @@ priors are at the [bottom](#influences-and-prior-art).
 ## Quick start
 
 You need: Docker + an agent CLI (Claude Code, Codex, OpenCode, OMP, Cursor,
-or anything else that speaks MCP).
+Antigravity CLI, or anything else that speaks MCP).
 
 The default quick-start has **no authentication** - the server binds
 to loopback only, so on a single-user laptop nothing else can reach
@@ -187,8 +188,8 @@ overwrites them so future image updates ship updated hooks. Drop
 - **Upgrades:** run `ai-memory upgrade` to refresh the wrapper, image,
   and staged hook scripts. Redeploy remote servers separately.
 
-For Codex, OpenCode, OMP, Cursor, Claude Desktop, Gemini CLI, OpenClaw,
-curl-based hook installs, source builds, CLI env vars, and the full
+For Codex, OpenCode, OMP, Cursor, Claude Desktop, Gemini CLI, Antigravity CLI,
+OpenClaw, curl-based hook installs, source builds, CLI env vars, and the full
 subcommand reference, see [`docs/install.md`](docs/install.md).
 
 ## Security
@@ -308,7 +309,7 @@ diagram, crate breakdown, schema notes, and invariants.
 | [`docs/usage.md`](docs/usage.md) | Handoffs, proactive memory queries, routing snippet, web UI, raw-wiki inspection, and rules-vs-facts workflow. |
 | [`docs/marker-file.md`](docs/marker-file.md) | `.ai-memory.toml` workspace/project routing for multi-client trees, mono-repos, and work/personal separation. |
 | [`docs/windows.md`](docs/windows.md) | Windows install modes: full WSL2, native Windows with Docker Desktop, native source builds, and current hook/MCP harness caveats. |
-| [`docs/mcp-install.md`](docs/mcp-install.md) | Per-client MCP and lifecycle notes (Cursor, Claude Desktop, Gemini CLI, OpenClaw, OMP). |
+| [`docs/mcp-install.md`](docs/mcp-install.md) | Per-client MCP and lifecycle notes (Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, OpenClaw, OMP). |
 | [`docs/deploy.md`](docs/deploy.md) | Homelab deploy: bin/deploy, bearer-token auth, TLS via cloudflared. |
 | [`docs/lifecycle-ops.md`](docs/lifecycle-ops.md) | **Read before running purge / rename / backup / restore / reset.** Safety matrix for the state-touching commands, per-project disk layout (how isolation actually works), and operator workflows for "fresh start", "snapshot before risky op", "drop one project". |
 | [`docs/llm-provider-comparison.md`](docs/llm-provider-comparison.md) | Empirical notes behind the recommended LLM defaults. |

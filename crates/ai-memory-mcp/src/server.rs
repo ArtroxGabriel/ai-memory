@@ -792,6 +792,7 @@ impl AiMemoryServer {
                 "opencode": "AGENTS.md",
                 "cursor": "AGENTS.md",
                 "gemini_cli": "AGENTS.md",
+                "antigravity_cli": "AGENTS.md",
                 "default": "AGENTS.md"
             },
             "notes": [

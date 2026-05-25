@@ -2,7 +2,7 @@
 # Sourced by per-agent lifecycle hook scripts. POSIX shell only —
 # no bash-isms, no external deps (no jq, no toml crate). Keep changes
 # byte-trivial because every supported agent (claude-code, codex,
-# cursor, gemini-cli, opencode, omp) sources this same file.
+# cursor, gemini-cli, antigravity-cli, opencode, omp) sources this same file.
 
 # Walk up from "$1" toward $HOME (or /) looking for `.ai-memory.toml`.
 # Prints the absolute path of the first marker found, or nothing.

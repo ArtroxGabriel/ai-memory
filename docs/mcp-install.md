@@ -19,9 +19,9 @@
 This page documents how to register ai-memory as an MCP server with
 agent CLIs beyond the README quick start.
 
-Claude Code, OpenAI Codex, Cursor, Gemini CLI, OpenClaw, OpenCode, and
+Claude Code, OpenAI Codex, Cursor, Gemini CLI, Antigravity CLI, OpenClaw, OpenCode, and
 OMP have automatic capture integrations (shell/PowerShell hooks for
-Claude Code / Codex / Cursor / Gemini CLI, TypeScript plugin/extension
+Claude Code / Codex / Cursor / Gemini CLI / Antigravity CLI, TypeScript plugin/extension
 files for OpenClaw / OpenCode / OMP) and are covered in the
 [main README](../README.md#quick-start).
 
@@ -41,7 +41,7 @@ the LLM to call `memory_handoff_begin` manually before quitting.
 > **One-shot tip:** every snippet below is also reachable from the
 > CLI:
 > ```bash
-> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / pi|omp
+> ai-memory install-mcp --client gemini-cli   # or cursor / claude-desktop / openclaw / pi|omp / antigravity-cli
 > ```
 
 ---
@@ -163,6 +163,102 @@ capture path; `SessionStart` also fetches pending handoffs.
 - Restart the CLI session after changing `~/.gemini/settings.json` so
   both MCP servers and hooks are reloaded.
 - Source: <https://github.com/google-gemini/gemini-cli/blob/main/docs/tools/mcp-server.md>
+
+---
+
+## Antigravity CLI (`agy`)
+
+**Status:** ✅ MCP supported. ✅ Lifecycle hooks supported via
+`ai-memory install-hooks --agent antigravity-cli --apply`.
+
+**Config file (MCP):** `~/.gemini/antigravity-cli/mcp_config.json`
+
+Antigravity CLI is the successor to Gemini CLI, built in Go with
+parallel subagent support. It uses a separate `mcp_config.json`
+(instead of Gemini CLI's combined `settings.json`) and uses
+`serverUrl` (not `httpUrl`) for streamable-HTTP endpoints.
+
+```bash
+# One-shot via CLI:
+ai-memory install-mcp --client antigravity-cli
+```
+
+The rendered snippet writes to `mcp_config.json` under `mcpServers`:
+
+```json
+{
+  "mcpServers": {
+    "ai-memory": {
+      "serverUrl": "http://127.0.0.1:49374/mcp",
+      "timeout": 5000
+    }
+  }
+}
+```
+
+**Config file (hooks):** `~/.gemini/antigravity-cli/hooks.json`
+
+Antigravity CLI uses a named-groups hook format. Each top-level key
+is a hook group name; inside, event arrays map to handlers. Tool
+events (`PreToolUse`, `PostToolUse`) use nested shape with matcher;
+lifecycle events (`PreInvocation`, `Stop`) use flat shape.
+
+```bash
+# One-shot via CLI:
+ai-memory install-hooks --agent antigravity-cli --apply
+```
+
+The rendered hooks config looks like:
+
+```json
+{
+  "ai-memory": {
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "AI_MEMORY_HOOK_URL=http://127.0.0.1:49374 /path/to/session-start.sh"
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AI_MEMORY_HOOK_URL=http://127.0.0.1:49374 /path/to/pre-tool-use.sh"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "AI_MEMORY_HOOK_URL=http://127.0.0.1:49374 /path/to/post-tool-use.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "AI_MEMORY_HOOK_URL=http://127.0.0.1:49374 /path/to/session-end.sh"
+      }
+    ]
+  }
+}
+```
+
+**Gotchas:**
+- Antigravity CLI uses `serverUrl` for HTTP MCP endpoints, not `url`
+  or `httpUrl`. The `--apply` flag writes the correct key.
+- Hook scripts are staged under `~/.local/share/ai-memory/hooks/antigravity-cli/`.
+- The `PreInvocation` event fires before each model call (not just at
+  session start). This is the closest equivalent to Gemini CLI's
+  `SessionStart`.
+- Source: <https://antigravity.google/docs/hooks>
 
 ---
 
@@ -300,8 +396,8 @@ that *starts* the next one - to play nicely with ai-memory:
 
 | Side | What's needed | Covered by |
 |---|---|---|
-| **Ending side** | The agent must create a handoff, either through a true session-end hook or by calling `memory_handoff_begin`. | Built-in for Claude Code, Codex, Cursor, Gemini CLI, OpenClaw, and OMP. OpenCode has no true session-end event, so ask it to call `memory_handoff_begin` before quitting when you need a handoff. |
-| **Starting side** | Either (a) the session-start/plugin path injects the handoff via `/handoff`, OR (b) the model proactively calls `memory_handoff_accept` on first turn. | (a) is built-in for Claude Code / Codex / Cursor / Gemini CLI / OpenClaw / OpenCode / OMP. (b) works for any MCP-capable client if you nudge the model - see [the routing snippet](usage.md#install-the-routing-snippet). |
+| **Ending side** | The agent must create a handoff, either through a true session-end hook or by calling `memory_handoff_begin`. | Built-in for Claude Code, Codex, Cursor, Gemini CLI, Antigravity CLI, OpenClaw, and OMP. OpenCode has no true session-end event, so ask it to call `memory_handoff_begin` before quitting when you need a handoff. |
+| **Starting side** | Either (a) the session-start/plugin path injects the handoff via `/handoff`, OR (b) the model proactively calls `memory_handoff_accept` on first turn. | (a) is built-in for Claude Code / Codex / Cursor / Gemini CLI / Antigravity CLI / OpenClaw / OpenCode / OMP. (b) works for any MCP-capable client if you nudge the model - see [the routing snippet](usage.md#install-the-routing-snippet). |
 
 So a typical mixed workflow looks like:
 

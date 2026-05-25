@@ -7,7 +7,7 @@ path (docker + Claude Code). This page covers everything else:
   (homelab, LAN box, remote server)
 - [Configuring the CLI URL and auth](#configuring-the-cli-url-and-auth)
 - [Configuring other agent CLIs](#configuring-other-agent-clis)
-  (Codex, OpenCode, OMP, Cursor, Claude Desktop, Gemini CLI, OpenClaw)
+  (Codex, OpenCode, OMP, Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, OpenClaw)
 - [Installing hooks without docker](#installing-hooks-without-docker)
   (curl-based installer)
 - [Running ai-memory without docker](#running-ai-memory-without-docker)
@@ -116,11 +116,11 @@ Each agent CLI needs two things:
    becomes manual.
 
 Claude Desktop is MCP-only today. Claude Code, Codex, OpenCode, OMP,
-Cursor, Gemini CLI, and OpenClaw have lifecycle capture paths through
+Cursor, Gemini CLI, Antigravity CLI, and OpenClaw have lifecycle capture paths through
 `install-hooks`.
 
-> **Two-step hook install pattern.** Claude Code, Codex, Cursor, and
-> Gemini CLI use shell/PowerShell hook scripts: (1) `docker cp` the
+> **Two-step hook install pattern.** Claude Code, Codex, Cursor,
+> Gemini CLI, and Antigravity CLI use shell/PowerShell hook scripts: (1) `docker cp` the
 > bundled scripts to your home dir, (2) `docker run --rm install-hooks`
 > to render the config snippet.
 > OpenClaw, OpenCode, and OMP are different: they use generated
@@ -214,7 +214,7 @@ files owned by the user running the command. Prefer it as the
 default; reach for `setup-agent` only when your docker setup is
 known not to remap UIDs.
 
-### Cursor, Gemini CLI, Claude Desktop, OpenClaw
+### Cursor, Gemini CLI, Claude Desktop, OpenClaw, Antigravity CLI
 
 See [**`docs/mcp-install.md`**](mcp-install.md) for the per-client MCP
 config file path and snippet, or one-shot it via:
@@ -249,7 +249,7 @@ docker run --rm akitaonrails/ai-memory:latest \
     --server-url "http://homelab:49374"
 ```
 
-Cursor, Gemini CLI, and OpenClaw support both `install-mcp` and
+Cursor, Gemini CLI, Antigravity CLI, and OpenClaw support both `install-mcp` and
 `install-hooks`. Claude Desktop is MCP-only here, so you'll need to
 nudge the model to call `memory_query` / `memory_handoff_accept` itself.
 For clients with `install-hooks` support, the capture path handles
@@ -277,7 +277,7 @@ docker run --rm akitaonrails/ai-memory:latest \
 ```
 
 The curl script installer supports
-`--agent claude-code|codex|cursor|gemini-cli|opencode|openclaw|omp|pi`
+`--agent claude-code|codex|cursor|gemini-cli|antigravity-cli|opencode|openclaw|omp|pi`
 and `--to <dir>`; `--help` prints the full flag list. OpenCode,
 OpenClaw, and OMP do not need script extraction because `install-hooks`
 generates TypeScript plugin/extension files for them instead.
@@ -584,6 +584,6 @@ write to `~/.local/share/ai-memory/hooks/`.
 - [`docs/usage.md`](usage.md) - handoffs, proactive querying, web UI,
   routing snippet, and raw-wiki inspection
 - [`docs/mcp-install.md`](mcp-install.md) - per-client MCP config
-  reference for Cursor, Claude Desktop, Gemini CLI, OpenClaw, OMP
+  reference for Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, OpenClaw, OMP
 - [`docs/ARCHITECTURE.md`](ARCHITECTURE.md) - what's actually
   running inside ai-memory

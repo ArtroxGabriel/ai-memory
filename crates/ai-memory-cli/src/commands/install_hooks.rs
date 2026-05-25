@@ -23,8 +23,9 @@ use crate::cli::{AgentChoice, InstallHooksArgs};
 use crate::commands::apply_shared::{ApplyOutcome, apply_atomic, mutate_json};
 use crate::commands::openclaw_plugin;
 use crate::commands::render_shared::{
-    CURSOR_PROFILE, GEMINI_PROFILE, build_claude_code_payload, build_codex_payload,
-    build_profile_payload, hook_script_for_current_platform, ts_string_literal,
+    CURSOR_PROFILE, GEMINI_PROFILE, build_antigravity_payload, build_claude_code_payload,
+    build_codex_payload, build_profile_payload, hook_script_for_current_platform,
+    ts_string_literal,
 };
 use crate::config::Config;
 
@@ -58,6 +59,10 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
                 apply_to_gemini_settings(&hooks_dir, &args.server_url, auth, &args)
             }
+            AgentChoice::AntigravityCli => {
+                let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
+                apply_to_antigravity_settings(&hooks_dir, &args.server_url, auth, &args)
+            }
             AgentChoice::Openclaw => openclaw_plugin::apply(&args.server_url, auth, &args),
         };
     }
@@ -79,6 +84,10 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
         AgentChoice::GeminiCli => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
             render_agent("gemini-cli", &hooks_dir, &args.server_url, auth)
+        }
+        AgentChoice::AntigravityCli => {
+            let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
+            render_agent("antigravity-cli", &hooks_dir, &args.server_url, auth)
         }
         AgentChoice::Openclaw => {
             openclaw_plugin::render(&args.server_url, auth);
@@ -388,6 +397,74 @@ fn merge_gemini_hooks(
                 .context("`hooks` is present in settings.json but not an object")?;
             for (event, value) in &our_hooks {
                 hooks.insert(event.clone(), value.clone());
+            }
+            Ok(())
+        })
+    })
+}
+
+/// Mutate `~/.gemini/antigravity-cli/hooks.json` so Antigravity CLI (`agy`)
+/// fires the ai-memory scripts on its lifecycle events.
+///
+/// Antigravity CLI uses a named-groups format where hook groups are
+/// top-level keys (e.g. `"ai-memory"`) containing event arrays. Tool
+/// events (`PreToolUse`, `PostToolUse`) use nested shape with matcher;
+/// lifecycle events (`PreInvocation`, `Stop`) use flat shape.
+///
+/// Config file: `~/.gemini/antigravity-cli/hooks.json`
+fn apply_to_antigravity_settings(
+    hooks_dir: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    args: &InstallHooksArgs,
+) -> Result<()> {
+    let path = match &args.config_file {
+        Some(p) => p.clone(),
+        None => dirs::home_dir()
+            .context("could not locate $HOME for ~/.gemini/antigravity-cli/hooks.json")?
+            .join(".gemini")
+            .join("antigravity-cli")
+            .join("hooks.json"),
+    };
+    let staged = stage_hook_scripts(hooks_dir, "antigravity-cli")?;
+    let command_dir = staged_command_dir(&staged, "antigravity-cli");
+    let outcome = merge_antigravity_hooks(&command_dir, server_url, auth_token, &path)?;
+    println!(
+        "✓ {} {} ({})",
+        outcome.verb(),
+        path.display(),
+        match outcome {
+            ApplyOutcome::Created => "new file",
+            ApplyOutcome::Updated => "backup written next to it",
+            ApplyOutcome::NoOp => "already up to date",
+        }
+    );
+    Ok(())
+}
+
+fn merge_antigravity_hooks(
+    staged: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    config_path: &Path,
+) -> Result<ApplyOutcome> {
+    let payload = build_antigravity_payload(staged, server_url, auth_token);
+    let our_group = payload
+        .get("ai-memory")
+        .and_then(|v| v.as_object())
+        .context("internal: build_antigravity_payload didn't return an ai-memory group")?
+        .clone();
+    apply_atomic(config_path, |existing| {
+        mutate_json(existing, |root| {
+            // Get-or-create the "ai-memory" named group; overlay
+            // our events. Other named groups survive untouched.
+            let group = root
+                .entry("ai-memory")
+                .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()))
+                .as_object_mut()
+                .context("`ai-memory` is present in hooks.json but not an object")?;
+            for (event, value) in &our_group {
+                group.insert(event.clone(), value.clone());
             }
             Ok(())
         })
@@ -1168,6 +1245,7 @@ fn resolve_hooks_dir(explicit: Option<&Path>, agent: AgentChoice) -> Result<Path
         AgentChoice::Codex => "codex",
         AgentChoice::Cursor => "cursor",
         AgentChoice::GeminiCli => "gemini-cli",
+        AgentChoice::AntigravityCli => "antigravity-cli",
         AgentChoice::OpenCode | AgentChoice::Omp | AgentChoice::Openclaw => {
             anyhow::bail!("{agent:?} uses a generated integration, not a hook script directory")
         }
@@ -1279,7 +1357,14 @@ mod tests {
             "PowerShell hooks require the shared lib helper"
         );
 
-        for agent_dir in ["claude-code", "codex", "cursor", "gemini-cli", "opencode"] {
+        for agent_dir in [
+            "claude-code",
+            "codex",
+            "cursor",
+            "gemini-cli",
+            "opencode",
+            "antigravity-cli",
+        ] {
             let dir = hooks_root.join(agent_dir);
             let mut sh = BTreeMap::new();
             let mut ps1 = BTreeMap::new();
@@ -1809,5 +1894,104 @@ mod tests {
             parsed["hooks"].get("PreToolUse").is_none(),
             "PreToolUse must not appear in Gemini config"
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Antigravity tests
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn antigravity_preserves_existing_hooks_and_adds_ours() {
+        let hooks_tmp = TempDir::new().unwrap();
+        stub_scripts(
+            hooks_tmp.path(),
+            &[
+                "session-start.sh",
+                "session-end.sh",
+                "pre-tool-use.sh",
+                "post-tool-use.sh",
+            ],
+        );
+
+        let config_tmp = TempDir::new().unwrap();
+        let config_path = config_tmp.path().join("hooks.json");
+        // Pre-existing settings with another named hook group.
+        fs::write(
+            &config_path,
+            r#"{"my-linter":{"PostToolUse":[{"matcher":"run_command","hooks":[{"type":"command","command":"lint.sh"}]}]}}"#,
+        )
+        .unwrap();
+
+        merge_antigravity_hooks(
+            hooks_tmp.path(),
+            "http://127.0.0.1:49374",
+            None,
+            &config_path,
+        )
+        .unwrap();
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+        // The pre-existing my-linter group survives.
+        assert!(
+            parsed["my-linter"]["PostToolUse"].is_array(),
+            "my-linter.PostToolUse must survive"
+        );
+        // Our named group "ai-memory" is present.
+        assert!(
+            parsed["ai-memory"]["PreInvocation"].is_array(),
+            "PreInvocation hook should be present"
+        );
+        assert!(
+            parsed["ai-memory"]["PreToolUse"].is_array(),
+            "PreToolUse hook should be present"
+        );
+        assert!(
+            parsed["ai-memory"]["PostToolUse"].is_array(),
+            "PostToolUse hook should be present"
+        );
+        assert!(
+            parsed["ai-memory"]["Stop"].is_array(),
+            "Stop hook should be present"
+        );
+    }
+
+    #[test]
+    fn antigravity_apply_is_idempotent() {
+        let hooks_tmp = TempDir::new().unwrap();
+        stub_scripts(
+            hooks_tmp.path(),
+            &[
+                "session-start.sh",
+                "session-end.sh",
+                "pre-tool-use.sh",
+                "post-tool-use.sh",
+            ],
+        );
+
+        let config_tmp = TempDir::new().unwrap();
+        let config_path = config_tmp.path().join("hooks.json");
+
+        let first = merge_antigravity_hooks(
+            hooks_tmp.path(),
+            "http://127.0.0.1:49374",
+            None,
+            &config_path,
+        )
+        .unwrap();
+        assert_ne!(
+            first,
+            ApplyOutcome::NoOp,
+            "first apply should not be a no-op"
+        );
+
+        let second = merge_antigravity_hooks(
+            hooks_tmp.path(),
+            "http://127.0.0.1:49374",
+            None,
+            &config_path,
+        )
+        .unwrap();
+        assert_eq!(second, ApplyOutcome::NoOp, "second apply must be a no-op");
     }
 }

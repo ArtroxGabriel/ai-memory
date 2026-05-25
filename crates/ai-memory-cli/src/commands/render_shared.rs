@@ -199,6 +199,87 @@ pub(crate) const GEMINI_PROFILE: HookProfile = HookProfile {
     shape: HookShape::Nested,
 };
 
+/// Antigravity CLI (`agy`) hook-event vocabulary (per
+/// <https://antigravity.google/docs/hooks>). Named-groups format
+/// at the top level; events inside each group.
+/// Tool events use nested shape (matcher + hooks), lifecycle
+/// events use flat shape (direct handler list).
+pub(crate) const ANTIGRAVITY_TOOL_EVENTS: [(&str, &str); 2] = [
+    ("PreToolUse", "pre-tool-use.sh"),
+    ("PostToolUse", "post-tool-use.sh"),
+];
+
+pub(crate) const ANTIGRAVITY_LIFECYCLE_EVENTS: [(&str, &str); 2] = [
+    ("PreInvocation", "session-start.sh"),
+    ("Stop", "session-end.sh"),
+];
+
+/// Build the Antigravity CLI (`agy`) `hooks.json` payload.
+///
+/// Antigravity CLI uses a named-groups format where the top level
+/// maps hook-group names to their event configurations. Each group
+/// can contain any subset of the supported events. Tool events
+/// (`PreToolUse`, `PostToolUse`) use the nested shape with matcher;
+/// lifecycle events (`PreInvocation`, `Stop`) use a flat handler
+/// list where matcher is ignored.
+///
+/// The output is `{ "ai-memory": { <events> } }`.
+#[must_use]
+pub(crate) fn build_antigravity_payload(
+    emit_root: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+) -> serde_json::Value {
+    build_antigravity_payload_for_platform(
+        emit_root,
+        server_url,
+        auth_token,
+        HookCommandPlatform::current(),
+    )
+}
+
+fn build_antigravity_payload_for_platform(
+    emit_root: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    platform: HookCommandPlatform,
+) -> serde_json::Value {
+    let mut group = serde_json::Map::new();
+
+    // Tool events: nested shape (matcher + inner hooks array)
+    for (event, script) in &ANTIGRAVITY_TOOL_EVENTS {
+        let s = script_for_platform(script, platform);
+        let abs = emit_root.join(s.as_ref());
+        let command = hook_command(&abs, server_url, auth_token, platform);
+        group.insert(
+            (*event).to_string(),
+            json!([{
+                "matcher": "",
+                "hooks": [{
+                    "type": "command",
+                    "command": command,
+                }],
+            }]),
+        );
+    }
+
+    // Lifecycle events: flat shape (direct handler list, no matcher)
+    for (event, script) in &ANTIGRAVITY_LIFECYCLE_EVENTS {
+        let s = script_for_platform(script, platform);
+        let abs = emit_root.join(s.as_ref());
+        let command = hook_command(&abs, server_url, auth_token, platform);
+        group.insert(
+            (*event).to_string(),
+            json!([{
+                "type": "command",
+                "command": command,
+            }]),
+        );
+    }
+
+    json!({ "ai-memory": group })
+}
+
 /// Build a Codex-flavoured hook payload. Thin alias for back-compat;
 /// new code should call `build_profile_payload(&CODEX_PROFILE, …)`.
 pub(crate) fn build_codex_payload(
@@ -636,5 +717,64 @@ mod tests {
             !cmd.contains("session-start.sh"),
             "Windows command must not use sh: {cmd}"
         );
+    }
+
+    #[test]
+    fn antigravity_payload_uses_named_groups_with_mixed_shape() {
+        let root = PathBuf::from("/host/hooks/antigravity-cli");
+        let v = build_antigravity_payload(&root, "http://localhost:49374", Some("tok"));
+
+        // Top-level key is the named group "ai-memory", not "hooks"
+        let group = v
+            .get("ai-memory")
+            .and_then(|g| g.as_object())
+            .expect("missing top-level 'ai-memory' named group");
+        assert!(
+            !v.as_object().unwrap().contains_key("hooks"),
+            "Antigravity uses named groups, not a 'hooks' wrapper"
+        );
+
+        // Tool events: nested shape (matcher + hooks array)
+        let pre_tool = group
+            .get("PreToolUse")
+            .and_then(|e| e.as_array())
+            .expect("missing PreToolUse");
+        let outer = pre_tool[0].as_object().unwrap();
+        assert!(outer.contains_key("matcher"));
+        let inner = outer.get("hooks").and_then(|h| h.as_array()).unwrap();
+        assert_eq!(inner.len(), 1);
+        let entry = inner[0].as_object().unwrap();
+        assert_eq!(entry.get("type").and_then(|t| t.as_str()), Some("command"));
+
+        // Lifecycle events: flat shape (no matcher, direct handler list)
+        let pre_invocation = group
+            .get("PreInvocation")
+            .and_then(|e| e.as_array())
+            .expect("missing PreInvocation");
+        let handler = pre_invocation[0].as_object().unwrap();
+        assert!(
+            !handler.contains_key("matcher"),
+            "PreInvocation should not have matcher (flat shape)"
+        );
+        assert!(
+            !handler.contains_key("hooks"),
+            "PreInvocation should not have inner hooks array (flat shape)"
+        );
+        assert_eq!(
+            handler.get("type").and_then(|t| t.as_str()),
+            Some("command")
+        );
+
+        // Auth token inlined into commands
+        let cmd = handler.get("command").and_then(|c| c.as_str()).unwrap();
+        assert!(cmd.contains("AI_MEMORY_AUTH_TOKEN=tok"));
+
+        // All expected events present
+        for expected in ["PreToolUse", "PostToolUse", "PreInvocation", "Stop"] {
+            assert!(
+                group.contains_key(expected),
+                "missing Antigravity event {expected}"
+            );
+        }
     }
 }

@@ -359,6 +359,9 @@ pub enum AgentChoice {
     /// OpenClaw personal AI gateway — native plugin package with
     /// session/tool/compaction hooks.
     Openclaw,
+    /// Google Antigravity CLI (`agy`) — JSON-config hooks in
+    /// `~/.gemini/antigravity-cli/hooks.json`.
+    AntigravityCli,
 }
 
 /// MCP client to render configuration for. Includes both the
@@ -389,6 +392,8 @@ pub enum McpClient {
     /// Oh My Pi (`omp`) / Pi-compatible coding agent — `~/.omp/agent/mcp.json`.
     #[value(alias = "omp", alias = "oh-my-pi")]
     Pi,
+    /// Google Antigravity CLI (`agy`) — `~/.gemini/antigravity-cli/mcp_config.json`.
+    AntigravityCli,
 }
 
 /// Arguments for `commit`.

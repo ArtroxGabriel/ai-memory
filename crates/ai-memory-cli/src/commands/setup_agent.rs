@@ -63,6 +63,7 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
         AgentChoice::Codex => "codex",
         AgentChoice::Cursor => "cursor",
         AgentChoice::GeminiCli => "gemini-cli",
+        AgentChoice::AntigravityCli => "antigravity-cli",
         AgentChoice::OpenCode => unreachable!("opencode handled above"),
         AgentChoice::Omp => unreachable!("omp handled above"),
         AgentChoice::Openclaw => unreachable!("openclaw handled above"),
@@ -120,7 +121,10 @@ pub fn run(config: &Config, args: SetupAgentArgs) -> Result<()> {
 
     match args.agent {
         AgentChoice::ClaudeCode => emit_claude_code(&emit_root, &args)?,
-        AgentChoice::Codex | AgentChoice::Cursor | AgentChoice::GeminiCli => {
+        AgentChoice::Codex
+        | AgentChoice::Cursor
+        | AgentChoice::GeminiCli
+        | AgentChoice::AntigravityCli => {
             emit_other(&emit_root, agent_sub, &args);
         }
         AgentChoice::OpenCode => unreachable!("opencode handled above"),

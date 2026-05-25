@@ -186,6 +186,8 @@ pub enum AgentKind {
     /// OpenClaw personal AI gateway.
     #[serde(rename = "openclaw", alias = "open-claw")]
     OpenClaw,
+    /// Google Antigravity CLI (`agy`).
+    AntigravityCli,
     /// Oh My Pi (`omp`) / Pi-compatible coding agent.
     Omp,
     /// Anything else (manual capture, future agents).
@@ -204,6 +206,7 @@ impl AgentKind {
             Self::GeminiCli => "gemini-cli",
             Self::ClaudeDesktop => "claude-desktop",
             Self::OpenClaw => "openclaw",
+            Self::AntigravityCli => "antigravity-cli",
             Self::Omp => "omp",
             Self::Other => "other",
         }
@@ -222,6 +225,7 @@ impl AgentKind {
             "gemini-cli" | "gemini" => Self::GeminiCli,
             "claude-desktop" | "claude_desktop" => Self::ClaudeDesktop,
             "openclaw" | "open-claw" => Self::OpenClaw,
+            "antigravity-cli" | "antigravity" | "agy" => Self::AntigravityCli,
             "omp" | "pi" | "oh-my-pi" => Self::Omp,
             _ => Self::Other,
         }
