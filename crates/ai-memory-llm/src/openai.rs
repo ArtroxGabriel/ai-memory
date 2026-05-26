@@ -346,6 +346,22 @@ impl OpenAiProvider {
 fn enforce_strict_object_schemas(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(map) => {
+            // OpenAI's structured-output validator rejects any sibling
+            // keyword next to `$ref` with a 400 (per JSON Schema 2020-12
+            // §8.2.3.1, $ref siblings are ignored during validation —
+            // OpenAI hardens that into a hard error). schemars 1.x emits
+            // a field-level `description` next to `$ref` for every
+            // doc-commented field typed as an external enum (e.g.
+            // `tier: Tier` on `ConsolidatedPageUpdate`); without this
+            // strip, `memory_consolidate multi_page=true` 400s on every
+            // call. Dropping the siblings is semantically a no-op —
+            // only the documentation-only annotation is lost; the
+            // type's own description on the referenced `$defs` entry
+            // is what reaches the model.
+            if map.contains_key("$ref") {
+                map.retain(|k, _| k == "$ref");
+                return;
+            }
             let is_object = map
                 .get("type")
                 .and_then(|t| t.as_str())
@@ -538,6 +554,60 @@ mod tests {
         assert!(names.contains(&"a"));
         assert!(names.contains(&"b"));
         assert_eq!(names.len(), 2);
+    }
+
+    #[test]
+    fn enforce_strict_strips_sibling_keywords_next_to_ref() {
+        // OpenAI's structured-output validator rejects any sibling
+        // keyword next to `$ref` with a 400. schemars 1.x emits a
+        // field-level `description` next to `$ref` whenever a
+        // doc-commented field is typed as an external enum (e.g.
+        // `tier: Tier` in `ConsolidatedPageUpdate`). Without this
+        // strip, `memory_consolidate multi_page=true` 400s on every
+        // call against gpt-4o-mini. JSON Schema 2020-12 §8.2.3.1 says
+        // siblings of `$ref` are ignored during validation, so
+        // dropping them is semantically a no-op — only the
+        // documentation-only field-level description is lost (the
+        // type's own description on the referenced definition stays).
+        let mut schema = json!({
+            "type": "object",
+            "properties": {
+                "tier": {
+                    "$ref": "#/$defs/Tier",
+                    "description": "Tier classification."
+                }
+            }
+        });
+        enforce_strict_object_schemas(&mut schema);
+        let tier = &schema["properties"]["tier"];
+        assert_eq!(tier["$ref"], json!("#/$defs/Tier"));
+        assert!(
+            tier.get("description").is_none(),
+            "description must be stripped from a $ref node"
+        );
+        assert_eq!(
+            tier.as_object().unwrap().len(),
+            1,
+            "only $ref should remain on the node"
+        );
+    }
+
+    #[test]
+    fn enforce_strict_strips_ref_siblings_inside_array_items() {
+        // The same JSON-Schema-2020-12 rule applies anywhere $ref
+        // appears, not just on direct object properties — schemars
+        // emits it inside `items` for `Vec<EnumType>` too.
+        let mut schema = json!({
+            "type": "array",
+            "items": {
+                "$ref": "#/$defs/Tier",
+                "description": "Each element classified."
+            }
+        });
+        enforce_strict_object_schemas(&mut schema);
+        let items = &schema["items"];
+        assert_eq!(items["$ref"], json!("#/$defs/Tier"));
+        assert!(items.get("description").is_none());
     }
 
     #[test]
