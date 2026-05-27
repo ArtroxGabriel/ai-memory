@@ -27,6 +27,7 @@ use config::Config;
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let config_path = cli.config.clone();
 
     let config = Arc::new(Config::load(cli.config.as_deref(), cli.data_dir.clone())?);
     let _logging_guard = logging::init(&config)?;
@@ -39,7 +40,7 @@ async fn main() -> Result<()> {
     );
 
     match cli.command {
-        Command::Init(args) => commands::init::run(&config, args),
+        Command::Init(args) => commands::init::run(&config, args, config_path.as_deref()),
         Command::Status(args) => commands::status::run(&config, args).await,
         Command::Search(args) => commands::search::run(&config, args).await,
         Command::WritePage(args) => commands::write_page::run(&config, args).await,

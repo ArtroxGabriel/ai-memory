@@ -59,6 +59,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --bin ai-memory
 
+  native-packaging:
+    name: native packaging assets
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: scripts/check-native-packaging.sh
+
   # End-to-end docker smoke: builds the published image and confirms
   # the binary inside runs. Catches Dockerfile drift (missing COPY,
   # bad ENTRYPOINT) before it lands in production.

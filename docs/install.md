@@ -6,6 +6,8 @@ path (docker + Claude Code). This page covers everything else:
 - [Server on a different machine](#server-on-a-different-machine)
   (homelab, LAN box, remote server)
 - [Configuring the CLI URL and auth](#configuring-the-cli-url-and-auth)
+- [Arch Linux native packages (AUR)](#arch-linux-native-packages-aur)
+  (systemd system service or user service)
 - [Configuring other agent CLIs](#configuring-other-agent-clis)
   (Codex, OpenCode, OMP, Cursor, Claude Desktop, Gemini CLI, Antigravity CLI, OpenClaw)
 - [Installing hooks without docker](#installing-hooks-without-docker)
@@ -100,6 +102,284 @@ pointed at the same server instead of falling back to loopback.
 
 `init`, `serve`, and `generate-auth-token` do not need these env vars because
 they either create local files or start the server itself.
+
+---
+
+## Arch Linux native packages (AUR)
+
+Use the native packages when you want `/usr/bin/ai-memory` plus systemd units
+instead of the Docker wrapper. The package installs the binary and hook sources
+once; each user still stages their agent hook scripts into their own home dir
+with `install-hooks --apply`.
+
+### Package choice
+
+```bash
+yay -S ai-memory-bin    # prebuilt Linux x86_64 binary, fastest install
+yay -S ai-memory        # builds from source, works on x86_64 and aarch64
+```
+
+Both packages install the same runtime layout:
+
+| Path | Purpose |
+|---|---|
+| `/usr/bin/ai-memory` | Native CLI/server binary. |
+| `/usr/share/ai-memory/hooks/` | Packaged hook source bundle used by `install-hooks`. |
+| `/usr/lib/systemd/system/ai-memory.service` | System-wide service unit. |
+| `/usr/lib/systemd/user/ai-memory.service` | Per-user service unit. |
+| `/usr/lib/sysusers.d/ai-memory.conf` | Creates the `ai-memory` system user. |
+| `/usr/lib/tmpfiles.d/ai-memory.conf` | Creates `/var/lib/ai-memory` for the system service. |
+| `/etc/ai-memory/config.toml` | System-service config file, tracked as a pacman backup file. |
+| `/etc/ai-memory/env` | System-service environment/secrets file, tracked as a pacman backup file. |
+
+The binary itself does not guess between system and user mode. The unit file
+chooses explicitly:
+
+| Mode | Data dir | Config | Env/secrets | Requires sudo? |
+|---|---|---|---|---|
+| User service | `~/.local/share/ai-memory` | `~/.config/ai-memory/config.toml` | `~/.config/ai-memory/env` | No |
+| System service | `/var/lib/ai-memory` | `/etc/ai-memory/config.toml` | `/etc/ai-memory/env` | Yes |
+
+Do not run both services on the same bind address. They can coexist on disk, but
+only one can listen on `127.0.0.1:49374` unless you change `bind` in one config.
+
+### User-level service
+
+Use this on a single-user workstation. It needs no sudo after package install and
+keeps all state in your home directory.
+
+```bash
+mkdir -p ~/.config/ai-memory ~/.local/share/ai-memory
+ai-memory \
+  --data-dir ~/.local/share/ai-memory \
+  --config ~/.config/ai-memory/config.toml \
+  init
+```
+
+Edit provider/auth settings if you want LLM consolidation or bearer auth:
+
+```bash
+$EDITOR ~/.config/ai-memory/config.toml
+$EDITOR ~/.config/ai-memory/env
+```
+
+For a loopback-only local service, bearer auth is optional. If you want one:
+
+```bash
+TOKEN=$(ai-memory generate-auth-token)
+printf 'AI_MEMORY_AUTH_TOKEN=%s\n' "$TOKEN" >> ~/.config/ai-memory/env
+```
+
+Start and inspect the service:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ai-memory.service
+systemctl --user status ai-memory.service
+journalctl --user -u ai-memory.service -f
+```
+
+If the service should keep running after you log out:
+
+```bash
+loginctl enable-linger "$USER"
+```
+
+Verify the HTTP server:
+
+```bash
+curl http://127.0.0.1:49374/mcp
+# Expect a JSON-RPC error, which means the server is reachable.
+```
+
+### System-level service
+
+Use this for a shared workstation, LAN box, or homelab-style host where the
+server should run independently of any logged-in user.
+
+Make sure the package-created user and state directory exist, then initialize
+the data layout as that service user:
+
+```bash
+sudo systemd-sysusers /usr/lib/sysusers.d/ai-memory.conf
+sudo systemd-tmpfiles --create /usr/lib/tmpfiles.d/ai-memory.conf
+sudo -u ai-memory ai-memory \
+  --data-dir /var/lib/ai-memory \
+  --config /etc/ai-memory/config.toml \
+  init
+```
+
+Edit system config and secrets:
+
+```bash
+sudoedit /etc/ai-memory/config.toml
+sudoedit /etc/ai-memory/env
+```
+
+The package installs `/etc/ai-memory/env` as root-readable only because it may
+hold API keys. Keep that file out of backups or logs that other users can read.
+
+For LAN exposure, set a non-loopback bind and allowed hosts in
+`/etc/ai-memory/config.toml`, and set a bearer token in `/etc/ai-memory/env`:
+
+```toml
+bind = "0.0.0.0:49374"
+allowed_hosts = ["homelab", "192.168.0.90", "localhost", "127.0.0.1"]
+```
+
+```bash
+TOKEN=$(ai-memory generate-auth-token)
+printf 'AI_MEMORY_AUTH_TOKEN=%s\n' "$TOKEN" | sudo tee -a /etc/ai-memory/env
+```
+
+Start and inspect the service:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now ai-memory.service
+sudo systemctl status ai-memory.service
+journalctl -u ai-memory.service -f
+```
+
+Verify from the host:
+
+```bash
+curl -sI http://127.0.0.1:49374/handoff
+# 401 Unauthorized when AI_MEMORY_AUTH_TOKEN is set.
+```
+
+### LLM provider login with native services
+
+API-key providers go in the relevant env file:
+
+```bash
+# User service
+printf 'AI_MEMORY_LLM_PROVIDER=anthropic\nANTHROPIC_API_KEY=sk-ant-...\n' >> ~/.config/ai-memory/env
+systemctl --user restart ai-memory.service
+
+# System service
+sudoedit /etc/ai-memory/env
+sudo systemctl restart ai-memory.service
+```
+
+OAuth-style providers write tokens into the selected data dir. Run the login
+with the same `--data-dir` and `--config` pair as the service:
+
+```bash
+# User service
+ai-memory \
+  --data-dir ~/.local/share/ai-memory \
+  --config ~/.config/ai-memory/config.toml \
+  auth login openai-oauth
+
+# System service
+sudo -u ai-memory ai-memory \
+  --data-dir /var/lib/ai-memory \
+  --config /etc/ai-memory/config.toml \
+  auth login openai-oauth
+```
+
+Use `auth login copilot` the same way for GitHub Copilot. Restart the service
+after changing provider settings:
+
+```bash
+systemctl --user restart ai-memory.service      # user mode
+sudo systemctl restart ai-memory.service        # system mode
+```
+
+### Wire agent CLIs after native install
+
+For a local loopback server with no bearer token:
+
+```bash
+ai-memory install-mcp   --client claude-code --apply
+ai-memory install-hooks --agent  claude-code --apply
+```
+
+For a bearer-protected local or LAN server, export the endpoint first. The MCP
+URL includes `/mcp`; the hook URL is the bare origin.
+
+```bash
+export AI_MEMORY_SERVER_URL="http://127.0.0.1:49374"
+export AI_MEMORY_AUTH_TOKEN="$TOKEN"
+
+ai-memory install-mcp   --client claude-code --apply
+ai-memory install-hooks --agent  claude-code --apply
+```
+
+`install-hooks` finds packaged hook sources under `/usr/share/ai-memory/hooks`,
+then stages runnable copies under `~/.local/share/ai-memory/hooks/<agent>/` so
+the agent can execute files owned by your user. Re-run `install-hooks --apply`
+after package upgrades to refresh those staged copies.
+
+### Native service operations
+
+```bash
+# User service
+systemctl --user restart ai-memory.service
+systemctl --user stop ai-memory.service
+journalctl --user -u ai-memory.service -n 100
+
+# System service
+sudo systemctl restart ai-memory.service
+sudo systemctl stop ai-memory.service
+journalctl -u ai-memory.service -n 100
+```
+
+Backups still use the same CLI, just point it at the service data dir:
+
+```bash
+# User service
+ai-memory --data-dir ~/.local/share/ai-memory backup --to ~/ai-memory-backup.tar.gz
+
+# System service
+sudo -u ai-memory ai-memory --data-dir /var/lib/ai-memory backup --to /var/lib/ai-memory/backup.tar.gz
+```
+
+Package removal does not delete data. Stop the service and remove state only
+when you intentionally want to erase memory:
+
+```bash
+systemctl --user disable --now ai-memory.service
+sudo systemctl disable --now ai-memory.service
+
+# Optional destructive cleanup:
+rm -rf ~/.local/share/ai-memory ~/.config/ai-memory
+sudo rm -rf /var/lib/ai-memory /etc/ai-memory
+```
+
+### Maintainer integration test
+
+The normal CI runs `scripts/check-native-packaging.sh`, a host-safe regression
+check that uses a temporary alternate root for `systemd-analyze`,
+`systemd-sysusers`, and `systemd-tmpfiles`. It verifies unit syntax, expected
+paths, sysusers output, tmpfiles rules, env-file mode, and AUR shell syntax
+without writing to host `/usr`, `/etc`, `/var`, or touching real services.
+
+The repo also includes a manual Arch integration harness that is intentionally
+kept out of routine CI because it creates a disposable distrobox, installs
+packages, starts real systemd services, and can take several minutes:
+
+```bash
+scripts/test-native-arch-systemd-distrobox.sh
+```
+
+It verifies the AUR metadata shape, builds the current working tree, installs
+the native layout into the disposable Arch container, starts the system service
+with `systemctl`, starts the user-profile command under transient systemd
+supervision, and checks that packaged hook sources under
+`/usr/share/ai-memory/hooks` can be staged by `install-hooks`.
+
+The destructive part of that script refuses to run unless it detects a
+container/distrobox environment.
+
+Useful knobs:
+
+```bash
+AI_MEMORY_NATIVE_TEST_BOX=ai-memory-native-test scripts/test-native-arch-systemd-distrobox.sh
+AI_MEMORY_NATIVE_TEST_KEEP_BOX=1 scripts/test-native-arch-systemd-distrobox.sh
+AI_MEMORY_NATIVE_TEST_IMAGE=quay.io/toolbx/arch-toolbox:latest scripts/test-native-arch-systemd-distrobox.sh
+```
 
 ---
 

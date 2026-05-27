@@ -1,16 +1,18 @@
 name: release
 
-# Triggered when a version tag is pushed, e.g. git push origin v0.2.0.
-# Builds the Docker image and pushes it to Docker Hub with both the
-# version tag and `latest`.
+# Triggered when a version tag is pushed, e.g. git push origin v0.3.0.
+# Builds the native Linux release tarball, creates the GitHub Release,
+# and pushes the Docker image to Docker Hub with both the version tag
+# and `latest` when Docker Hub credentials are configured.
 #
-# Required secrets (set in repo Settings → Secrets and variables → Actions):
+# Optional publish secrets (set in repo Settings → Secrets and variables → Actions):
 #   DOCKERHUB_USERNAME  — Docker Hub account name
 #   DOCKERHUB_TOKEN     — Docker Hub access token (read/write)
+#   AUR_SSH_PRIVATE_KEY — private key for an AUR account with maintainer access
 #
-# The CI workflow already validates the binary (fmt / clippy / test).
-# This workflow assumes CI passed on the same commit; it only builds
-# and pushes the image.
+# The CI workflow already validates the binary and package assets
+# (fmt / clippy / test / native-packaging). This workflow assumes CI
+# passed on the same commit and only performs release publication.
 
 on:
   push:
@@ -20,30 +22,121 @@ on:
 env:
   CARGO_TERM_COLOR: always
 
+permissions:
+  contents: write
+  packages: write
+
 jobs:
+  validate-version:
+    name: validate release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - id: version
+        run: |
+          set -euo pipefail
+          tag_version="${GITHUB_REF_NAME#v}"
+          manifest_version="$(awk -F ' *= *' '
+            /^\[workspace.package\]$/ { in_workspace_package = 1; next }
+            /^\[/ { in_workspace_package = 0 }
+            in_workspace_package && $1 == "version" {
+              gsub(/"/, "", $2);
+              print $2;
+              exit;
+            }
+          ' Cargo.toml)"
+          if [ -z "$manifest_version" ]; then
+            echo "could not read [workspace.package].version from Cargo.toml" >&2
+            exit 1
+          fi
+          if [ "$tag_version" != "$manifest_version" ]; then
+            echo "tag version v${tag_version} does not match Cargo.toml version ${manifest_version}" >&2
+            exit 1
+          fi
+          echo "version=${tag_version}" >> "$GITHUB_OUTPUT"
+
+  binary:
+    name: linux x86_64 binary
+    needs: validate-version
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@1.95
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        env:
+          TAILWIND_SKIP: "1"
+        run: cargo build --release -p ai-memory-cli
+
+      - name: Create release tarball
+        run: |
+          artifact="ai-memory-linux-x86_64"
+          mkdir -p "dist/$artifact"
+          cp target/release/ai-memory "dist/$artifact/ai-memory"
+          cp -a hooks "dist/$artifact/hooks"
+          mkdir -p "dist/$artifact/packaging"
+          cp -a packaging/systemd "dist/$artifact/packaging/systemd"
+          cp -a packaging/sysusers "dist/$artifact/packaging/sysusers"
+          cp -a packaging/tmpfiles "dist/$artifact/packaging/tmpfiles"
+          cp -a packaging/env "dist/$artifact/packaging/env"
+          mkdir -p "dist/$artifact/crates/ai-memory-cli/templates"
+          cp crates/ai-memory-cli/templates/config.default.toml \
+            "dist/$artifact/crates/ai-memory-cli/templates/config.default.toml"
+          mkdir -p "dist/$artifact/docs"
+          cp README.md LICENSE "dist/$artifact/"
+          cp docs/install.md "dist/$artifact/docs/install.md"
+          tar -C "dist/$artifact" -czf "$artifact.tar.gz" .
+          sha256sum "$artifact.tar.gz" > "$artifact.tar.gz.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ai-memory-linux-x86_64
+          path: |
+            ai-memory-linux-x86_64.tar.gz
+            ai-memory-linux-x86_64.tar.gz.sha256
+
   # Gate the publish on the Docker Hub secrets actually being present, so a
   # fresh clone (or a fork) doesn't get a red failing run on every tag. The
   # docker job activates automatically once DOCKERHUB_USERNAME + _TOKEN are
-  # set in repo Settings → Secrets and variables → Actions.
+  # set in repo Settings → Secrets and variables → Actions. Same idea for AUR:
+  # publishing activates only when AUR_SSH_PRIVATE_KEY is configured.
   check-secrets:
     name: check publish credentials
     runs-on: ubuntu-latest
     outputs:
-      enabled: ${{ steps.check.outputs.enabled }}
+      docker_enabled: ${{ steps.check.outputs.docker_enabled }}
+      aur_enabled: ${{ steps.check.outputs.aur_enabled }}
     steps:
       - id: check
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
-          if [ -n "${{ secrets.DOCKERHUB_TOKEN }}" ] && [ -n "${{ secrets.DOCKERHUB_USERNAME }}" ]; then
-            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          if [ -n "$DOCKERHUB_TOKEN" ] && [ -n "$DOCKERHUB_USERNAME" ]; then
+            echo "docker_enabled=true" >> "$GITHUB_OUTPUT"
           else
-            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "docker_enabled=false" >> "$GITHUB_OUTPUT"
             echo "::warning::DOCKERHUB_USERNAME / DOCKERHUB_TOKEN not set — skipping image publish. Add them in repo Settings → Secrets and variables → Actions to enable tag-triggered publishing."
+          fi
+
+          if [ -n "$AUR_SSH_PRIVATE_KEY" ]; then
+            echo "aur_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "aur_enabled=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::AUR_SSH_PRIVATE_KEY not set — skipping AUR publish."
           fi
 
   docker:
     name: docker build + push
-    needs: check-secrets
-    if: needs.check-secrets.outputs.enabled == 'true'
+    needs: [check-secrets, validate-version]
+    if: needs.check-secrets.outputs.docker_enabled == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -59,11 +152,6 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # Extract the version from the tag (strips the leading "v").
-      - name: Extract version
-        id: version
-        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
-
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -72,13 +160,152 @@ jobs:
           push: true
           tags: |
             ${{ secrets.DOCKERHUB_USERNAME }}/ai-memory:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/ai-memory:${{ steps.version.outputs.VERSION }}
+            ${{ secrets.DOCKERHUB_USERNAME }}/ai-memory:${{ needs.validate-version.outputs.version }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
       - name: Smoke test the published image
         run: |
-          docker pull "${{ secrets.DOCKERHUB_USERNAME }}/ai-memory:${{ steps.version.outputs.VERSION }}"
+          docker pull "${{ secrets.DOCKERHUB_USERNAME }}/ai-memory:${{ needs.validate-version.outputs.version }}"
           docker run --rm \
-            "${{ secrets.DOCKERHUB_USERNAME }}/ai-memory:${{ steps.version.outputs.VERSION }}" \
+            "${{ secrets.DOCKERHUB_USERNAME }}/ai-memory:${{ needs.validate-version.outputs.version }}" \
             --version
+
+  github-release:
+    name: github release
+    needs: [binary, validate-version]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Generate release body
+        run: |
+          echo "## Checksums (SHA256)" > body.md
+          echo '```' >> body.md
+          cat artifacts/*.sha256 >> body.md
+          echo '```' >> body.md
+          echo "" >> body.md
+          echo "## Install" >> body.md
+          echo '```bash' >> body.md
+          echo "# Arch Linux (AUR)" >> body.md
+          echo "yay -S ai-memory-bin      # prebuilt Linux x86_64 binary" >> body.md
+          echo "yay -S ai-memory          # builds from source" >> body.md
+          echo "" >> body.md
+          echo "# Docker" >> body.md
+          echo "docker pull akitaonrails/ai-memory:${{ needs.validate-version.outputs.version }}" >> body.md
+          echo "" >> body.md
+          echo "# From source" >> body.md
+          echo "cargo install --git https://github.com/akitaonrails/ai-memory --tag ${GITHUB_REF_NAME}" >> body.md
+          echo '```' >> body.md
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" artifacts/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file body.md \
+            --latest
+
+  aur:
+    name: aur publish
+    needs: [check-secrets, github-release, validate-version]
+    if: needs.check-secrets.outputs.aur_enabled == 'true'
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ai-memory-linux-x86_64
+          path: artifacts
+
+      - name: Install AUR publish tools
+        run: pacman -Syu --noconfirm --needed base-devel curl git openssh
+
+      - name: Publish ai-memory AUR packages
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          VERSION: ${{ needs.validate-version.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          version="$VERSION"
+          source_sha="$(curl -fsSL "https://github.com/akitaonrails/ai-memory/archive/refs/tags/v${version}.tar.gz" | sha256sum | awk '{print $1}')"
+          bin_sha="$(sha256sum artifacts/ai-memory-linux-x86_64.tar.gz | awk '{print $1}')"
+
+          useradd -m aurbuild
+          chown -R aurbuild:aurbuild "$GITHUB_WORKSPACE"
+          install -d -m 0700 -o aurbuild -g aurbuild /home/aurbuild/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /home/aurbuild/.ssh/aur
+          chmod 0600 /home/aurbuild/.ssh/aur
+          chown aurbuild:aurbuild /home/aurbuild/.ssh/aur
+          ssh-keyscan aur.archlinux.org > /home/aurbuild/.ssh/known_hosts
+          chown aurbuild:aurbuild /home/aurbuild/.ssh/known_hosts
+          cat >/home/aurbuild/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            HostName aur.archlinux.org
+            User aur
+            IdentityFile ~/.ssh/aur
+            IdentitiesOnly yes
+          EOF
+          chown aurbuild:aurbuild /home/aurbuild/.ssh/config
+          chmod 0600 /home/aurbuild/.ssh/config
+
+          runuser -u aurbuild -- bash -s -- "$version" "$source_sha" "$bin_sha" "$GITHUB_WORKSPACE" <<'EOF'
+          set -euo pipefail
+
+          version="$1"
+          source_sha="$2"
+          bin_sha="$3"
+          workspace="$4"
+          workdir="/tmp/ai-memory-aur-publish"
+
+          git config --global user.name "ai-memory release bot"
+          git config --global user.email "actions@github.com"
+
+          rm -rf "$workdir"
+          mkdir -p "$workdir/generated"
+
+          source_pkgbuild="$workdir/generated/PKGBUILD.source"
+          bin_pkgbuild="$workdir/generated/PKGBUILD.bin"
+          cp "$workspace/packaging/aur/PKGBUILD" "$source_pkgbuild"
+          cp "$workspace/packaging/aur/PKGBUILD-bin" "$bin_pkgbuild"
+
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${version}/" \
+            -e "s/^pkgrel=.*/pkgrel=1/" \
+            -e "s/^sha256sums=('.*')/sha256sums=('${source_sha}')/" \
+            "$source_pkgbuild"
+          sed -i \
+            -e "s/^pkgver=.*/pkgver=${version}/" \
+            -e "s/^pkgrel=.*/pkgrel=1/" \
+            -e "s/^sha256sums_x86_64=('.*')/sha256sums_x86_64=('${bin_sha}')/" \
+            "$bin_pkgbuild"
+
+          publish_pkg() {
+            pkgbase="$1"
+            pkgbuild="$2"
+            repo="$workdir/$pkgbase"
+
+            git clone "ssh://aur@aur.archlinux.org/${pkgbase}.git" "$repo"
+            cp "$pkgbuild" "$repo/PKGBUILD"
+            cp "$workspace/packaging/aur/ai-memory.install" "$repo/ai-memory.install"
+            (cd "$repo" && makepkg --printsrcinfo > .SRCINFO)
+            (cd "$repo" && git add PKGBUILD .SRCINFO ai-memory.install)
+            if (cd "$repo" && git diff --cached --quiet); then
+              echo "${pkgbase}: no AUR changes to publish"
+              return 0
+            fi
+            (cd "$repo" && git commit -m "Update to ${version}")
+            (cd "$repo" && git push)
+          }
+
+          publish_pkg ai-memory "$source_pkgbuild"
+          publish_pkg ai-memory-bin "$bin_pkgbuild"
+          EOF

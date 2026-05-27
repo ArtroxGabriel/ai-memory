@@ -6,6 +6,13 @@ reachable on your LAN at `http://<host>:49374/mcp`, configured with
 your LLM/embedding API keys, with backups handled by whatever you
 already use for `/var/opt/docker/...`.
 
+If you want a native Linux service instead of Docker, use the Arch/AUR
+systemd path in [`docs/install.md`](install.md#arch-linux-native-packages-aur).
+That install mode uses `/var/lib/ai-memory` plus `/etc/ai-memory/` for the
+system service, or XDG user paths for the user service. The Docker deployment
+below remains `/data` inside the container and `/var/opt/docker/...` on the
+host.
+
 ## What gets committed vs. what stays local
 
 The repo ships **templates only**. The real files with your homelab

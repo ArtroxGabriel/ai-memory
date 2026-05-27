@@ -18,7 +18,7 @@
 
 | Area | Status | Notes |
 |---|---|---|
-| Linux | Supported | Primary Docker/server target and CI platform. |
+| Linux | Supported | Primary Docker/server target and CI platform. Native Arch/AUR packages include system and user systemd units. |
 | macOS | Supported | Workspace tests run in CI; native source builds are supported. |
 | Windows via WSL2 | Supported | Use the Linux install path inside WSL2 when the agent runs there. |
 | Native Windows | Experimental | PowerShell wrapper and `.ps1` hooks are available; real agent harness feedback still needed. See [`docs/windows.md`](docs/windows.md). |
@@ -116,6 +116,34 @@ priors are at the [bottom](#influences-and-prior-art).
   `rm -rf`'d, every sibling project is untouched by construction.
 
 ## Quick start
+
+### Arch Linux (AUR)
+
+For native Arch installs, use the AUR packages. They install
+`/usr/bin/ai-memory`, packaged hook sources, and both system-level and
+user-level systemd units.
+
+```bash
+yay -S ai-memory-bin    # prebuilt Linux x86_64 binary
+yay -S ai-memory        # builds from source
+```
+
+Single-user workstation:
+
+```bash
+mkdir -p ~/.config/ai-memory ~/.local/share/ai-memory
+ai-memory --data-dir ~/.local/share/ai-memory \
+  --config ~/.config/ai-memory/config.toml init
+systemctl --user enable --now ai-memory.service
+ai-memory install-mcp --client claude-code --apply
+ai-memory install-hooks --agent claude-code --apply
+```
+
+System service installs use `/var/lib/ai-memory` and `/etc/ai-memory/` via the
+packaged unit. Full user-service, system-service, auth, and provider setup is in
+[`docs/install.md#arch-linux-native-packages-aur`](docs/install.md#arch-linux-native-packages-aur).
+
+### Docker
 
 You need: Docker + an agent CLI (Claude Code, Codex, OpenCode, OMP, Cursor,
 Antigravity CLI, or anything else that speaks MCP).

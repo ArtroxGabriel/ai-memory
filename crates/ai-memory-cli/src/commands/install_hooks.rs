@@ -1432,24 +1432,36 @@ fn resolve_hooks_dir(explicit: Option<&Path>, agent: AgentChoice) -> Result<Path
     }
 
     // Probe candidates in order. The first dir that exists wins.
-    let candidates: [PathBuf; 3] = [
-        // Cargo-run from the repo.
-        repo_root_guess()
-            .map(|r| r.join("hooks").join(sub))
-            .unwrap_or_default(),
-        // Docker image lays them out under /usr/local/share/ai-memory/.
-        PathBuf::from(format!("/usr/local/share/ai-memory/hooks/{sub}")),
-        // Local install honourable mention.
-        dirs::data_local_dir()
-            .map(|d| d.join("ai-memory/hooks").join(sub))
-            .unwrap_or_default(),
-    ];
+    let candidates = hook_source_candidates(sub, repo_root_guess(), dirs::data_local_dir());
     for path in &candidates {
         if !path.as_os_str().is_empty() && path.is_dir() {
             return Ok(path.clone());
         }
     }
     anyhow::bail!("could not locate hooks directory. Tried: {:?}", candidates,);
+}
+
+fn hook_source_candidates(
+    sub: &str,
+    repo_root: Option<PathBuf>,
+    data_local_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::with_capacity(4);
+    // Cargo-run from the repo.
+    if let Some(root) = repo_root {
+        candidates.push(root.join("hooks").join(sub));
+    }
+    // Docker image lays them out under /usr/local/share/ai-memory/.
+    candidates.push(PathBuf::from(format!(
+        "/usr/local/share/ai-memory/hooks/{sub}"
+    )));
+    // Native Linux packages install hook sources under /usr/share.
+    candidates.push(PathBuf::from(format!("/usr/share/ai-memory/hooks/{sub}")));
+    // Local install honourable mention.
+    if let Some(dir) = data_local_dir {
+        candidates.push(dir.join("ai-memory/hooks").join(sub));
+    }
+    candidates
 }
 
 fn repo_root_guess() -> Option<PathBuf> {
@@ -1780,6 +1792,29 @@ Authorization = "Bearer secret-token"
         let staged = stage_hook_scripts_in(&agent_src, "stage-no-lib", &data_dir).unwrap();
         assert!(staged.join("session-start.sh").exists());
         assert!(!staged.join("_lib.sh").exists());
+    }
+
+    #[test]
+    fn hook_source_candidates_include_native_package_dir() {
+        let candidates = hook_source_candidates(
+            "claude-code",
+            Some(PathBuf::from("/repo")),
+            Some(PathBuf::from("/home/alice/.local/share")),
+        );
+
+        assert_eq!(candidates[0], PathBuf::from("/repo/hooks/claude-code"));
+        assert_eq!(
+            candidates[1],
+            PathBuf::from("/usr/local/share/ai-memory/hooks/claude-code")
+        );
+        assert_eq!(
+            candidates[2],
+            PathBuf::from("/usr/share/ai-memory/hooks/claude-code")
+        );
+        assert_eq!(
+            candidates[3],
+            PathBuf::from("/home/alice/.local/share/ai-memory/hooks/claude-code")
+        );
     }
 
     // ----------------------------------------------------------------

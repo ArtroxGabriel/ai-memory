@@ -270,6 +270,8 @@ fn resolve_source(explicit: Option<&Path>, sub: &str) -> Result<PathBuf> {
         let mut v = vec![
             // Docker image lays them out under /usr/local/share/.
             PathBuf::from(format!("/usr/local/share/ai-memory/hooks/{sub}")),
+            // Native Linux packages install hook sources under /usr/share.
+            PathBuf::from(format!("/usr/share/ai-memory/hooks/{sub}")),
         ];
         // Repo-local fallback for `cargo run setup-agent` during dev.
         if let Some(p) = std::env::current_exe()
