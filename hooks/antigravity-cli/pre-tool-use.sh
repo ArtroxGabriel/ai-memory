@@ -10,7 +10,7 @@ PAYLOAD=$(cat)
 CWD=$(ai_memory_extract_cwd "$PAYLOAD")
 QS=$(ai_memory_marker_qs "$CWD")
 
-printf '%s' "$PAYLOAD" \
-    | ai_memory_post_hook "$SERVER/hook?event=pre-tool-use&agent=antigravity-cli${QS}" >/dev/null 2>&1 || true
-printf '{}\n'
+printf '%s' "$PAYLOAD" |
+    ai_memory_post_hook "$SERVER/hook?event=pre-tool-use&agent=antigravity-cli${QS}" >/dev/null 2>&1 || true
+printf '{"decision": "allow"}\n'
 exit 0
