@@ -468,23 +468,30 @@ impl AiMemoryServer {
 
     /// Resolve which `(workspace_id, project_id)` a read tool should
     /// query. Precedence (matches the documented resolution chain):
-    ///   1. an explicit `project` name argument (looked up read-only in
-    ///      the server's workspace; ignored if no such project exists),
-    ///   2. the hook-published [`ActiveProject`] (the cwd the agent is
+    ///   1. an explicit `project` name argument in the active workspace
+    ///      when hooks have published one,
+    ///   2. that same explicit `project` in the server's baked workspace,
+    ///   3. the hook-published [`ActiveProject`] (the cwd the agent is
     ///      currently working in),
-    ///   3. the server's baked-in `--project` default.
+    ///   4. the server's baked-in `--project` default.
     async fn effective_ids(&self, explicit_project: Option<&str>) -> (WorkspaceId, ProjectId) {
-        if let Some(name) = explicit_project.map(str::trim).filter(|s| !s.is_empty())
-            && let Ok(Some(pid)) = self
-                .reader
-                .find_project(self.workspace_id, name.to_string())
-                .await
-        {
-            return (self.workspace_id, pid);
+        let active = self.active_project.get();
+        if let Some(name) = explicit_project.map(str::trim).filter(|s| !s.is_empty()) {
+            if let Some((active_ws, _)) = active
+                && let Ok(Some(pid)) = self.reader.find_project(active_ws, name.to_string()).await
+            {
+                return (active_ws, pid);
+            }
+            if active.map(|(ws, _)| ws) != Some(self.workspace_id)
+                && let Ok(Some(pid)) = self
+                    .reader
+                    .find_project(self.workspace_id, name.to_string())
+                    .await
+            {
+                return (self.workspace_id, pid);
+            }
         }
-        self.active_project
-            .get()
-            .unwrap_or((self.workspace_id, self.project_id))
+        active.unwrap_or((self.workspace_id, self.project_id))
     }
 
     async fn effective_ids_for_read_args(
@@ -1481,6 +1488,7 @@ mod tests {
     use super::*;
     use ai_memory_core::{NewObservation, NewPage, NewSession, ObservationKind, PagePath, Tier};
     use ai_memory_store::Store;
+    use ai_memory_wiki::Wiki;
     use tempfile::TempDir;
 
     async fn setup_server() -> (TempDir, Store, AiMemoryServer, WorkspaceId, ProjectId) {
@@ -1615,7 +1623,8 @@ mod tests {
     }
 
     /// Read tools resolve the project in the order: explicit `project`
-    /// arg → hook-published active project → baked-in default (issue #2).
+    /// arg in the active workspace, explicit `project` in the baked
+    /// workspace, hook-published active project, baked-in default (issue #2).
     #[tokio::test]
     async fn effective_ids_follows_precedence_chain() {
         let (_tmp, store, server, ws, baked) = setup_server().await;
@@ -1723,6 +1732,93 @@ mod tests {
         assert_eq!(
             ws4, baked_ws,
             "no active project → baked workspace is the fallback"
+        );
+    }
+
+    #[tokio::test]
+    async fn project_only_write_round_trips_with_project_only_read_in_active_workspace() {
+        let (tmp, store, server, baked_ws, _baked_proj) = setup_server().await;
+        let wiki = Wiki::new(tmp.path(), store.writer.clone()).unwrap();
+        let server = server.with_wiki(wiki);
+
+        let active_ws = store
+            .writer
+            .get_or_create_workspace("djalmajr")
+            .await
+            .unwrap();
+        let active_proj = store
+            .writer
+            .get_or_create_project(active_ws, "ai-memory", None)
+            .await
+            .unwrap();
+        server.active_project.set(active_ws, active_proj);
+
+        server
+            .memory_write_page(Parameters(WritePageArgs {
+                path: "notes/sibling.md".to_string(),
+                body: "project-only write should use the active workspace".to_string(),
+                title: Some("Sibling Note".to_string()),
+                tier: None,
+                tags: Vec::new(),
+                pinned: false,
+                project: Some("sibling".to_string()),
+                workspace: None,
+            }))
+            .await
+            .unwrap();
+
+        assert!(
+            store
+                .reader
+                .find_project(baked_ws, "sibling".to_string())
+                .await
+                .unwrap()
+                .is_none(),
+            "project-only write must not recreate default/sibling"
+        );
+        let sibling_proj = store
+            .reader
+            .find_project(active_ws, "sibling".to_string())
+            .await
+            .unwrap()
+            .expect("project-only write should create active-workspace sibling");
+        let direct_hits = store
+            .reader
+            .recent_pages_for_project(active_ws, sibling_proj, 5)
+            .await
+            .unwrap();
+        assert_eq!(
+            direct_hits.len(),
+            1,
+            "direct read should see the written page"
+        );
+        assert_eq!(
+            server.effective_ids(Some("sibling")).await,
+            (active_ws, sibling_proj),
+            "project-only read resolution should use the active workspace"
+        );
+
+        let result = server
+            .memory_recent(Parameters(RecentArgs {
+                limit: Some(5),
+                project: Some("sibling".to_string()),
+                workspace: None,
+            }))
+            .await
+            .unwrap();
+        let text = result
+            .content
+            .first()
+            .and_then(|c| c.as_text())
+            .map(|t| t.text.as_str())
+            .unwrap_or_else(|| panic!("expected text content"));
+        assert!(
+            text.contains("notes/sibling.md"),
+            "project-only read must find the active-workspace write:\n{text}"
+        );
+        assert!(
+            text.contains("Sibling Note"),
+            "project-only read must return the written page:\n{text}"
         );
     }
 
