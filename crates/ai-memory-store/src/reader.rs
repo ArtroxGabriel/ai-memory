@@ -41,6 +41,20 @@ pub struct PageHit {
     pub rank: f64,
 }
 
+/// The latest version of a page's stored content, used as a DB-backed
+/// fallback when the on-disk markdown read fails (index/disk skew). The
+/// markdown file is the source of truth, but the store keeps a faithful copy
+/// written in the same transaction, so serving it is safe.
+#[derive(Debug, Clone)]
+pub struct StoredPageBody {
+    /// Page title as stored in the DB.
+    pub title: String,
+    /// Page body (markdown without frontmatter).
+    pub body: String,
+    /// Raw `frontmatter_json` TEXT column (parse at the call site).
+    pub frontmatter_json: String,
+}
+
 /// Search hit with workspace/project names, used by the web UI to avoid
 /// per-hit metadata lookups after a global search.
 #[derive(Debug, Clone, Serialize)]
@@ -2568,6 +2582,42 @@ impl ReaderPool {
                 )
                 .optional()?;
             row_opt.transpose()
+        })
+        .await
+    }
+
+    /// Fetch the latest version's stored body/title/frontmatter for a page by
+    /// `(workspace_id, project_id, path)`. Used as a DB-backed fallback for
+    /// `memory_read_page` when the on-disk markdown read fails (index/disk
+    /// skew — see `gotchas/read-page-by-query-misses`). Returns `None` when no
+    /// `is_latest` row exists.
+    ///
+    /// # Errors
+    /// Propagates any SQL or pool error.
+    pub async fn page_body_by_ids(
+        &self,
+        workspace_id: WorkspaceId,
+        project_id: ProjectId,
+        path: &str,
+    ) -> StoreResult<Option<StoredPageBody>> {
+        let path = path.to_owned();
+        self.with_conn(move |conn| {
+            let row = conn
+                .query_row(
+                    "SELECT title, body, frontmatter_json FROM pages \
+                     WHERE workspace_id = ?1 AND project_id = ?2 AND path = ?3 \
+                       AND is_latest = 1",
+                    params![workspace_id.as_bytes(), project_id.as_bytes(), path],
+                    |row| {
+                        Ok(StoredPageBody {
+                            title: row.get(0)?,
+                            body: row.get(1)?,
+                            frontmatter_json: row.get(2)?,
+                        })
+                    },
+                )
+                .optional()?;
+            Ok(row)
         })
         .await
     }

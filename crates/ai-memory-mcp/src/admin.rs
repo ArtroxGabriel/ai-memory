@@ -461,10 +461,40 @@ async fn handle_read_page(
                 Json(serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({}))),
             )
         }
-        Err(e) => (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({ "error": e.to_string() })),
-        ),
+        // On-disk read failed — fall back to the DB's faithful copy before
+        // 404ing (index/disk skew; see gotchas/read-page-by-query-misses).
+        Err(disk_err) => match state
+            .reader
+            .page_body_by_ids(ws, proj, page_path.as_str())
+            .await
+        {
+            Ok(Some(stored)) => {
+                let frontmatter: serde_json::Value = serde_json::from_str(&stored.frontmatter_json)
+                    .unwrap_or(serde_json::Value::Null);
+                let title = frontmatter
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+                    .or(Some(stored.title));
+                let resp = ReadPageResponse {
+                    path: page_path.to_string(),
+                    workspace: query.workspace,
+                    project: query.project,
+                    title,
+                    body: stored.body,
+                    frontmatter,
+                };
+                (
+                    StatusCode::OK,
+                    Json(serde_json::to_value(&resp).unwrap_or_else(|_| serde_json::json!({}))),
+                )
+            }
+            Ok(None) => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": disk_err.to_string() })),
+            ),
+            Err(e) => internal_err(e.to_string()),
+        },
     }
 }
 

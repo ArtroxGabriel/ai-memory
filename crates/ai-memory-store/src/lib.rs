@@ -30,7 +30,7 @@ pub use reader::{
     ActivityWindow, BriefingPage, BriefingSnapshot, DecayCandidate, DerivedIndexStatus,
     EmbeddingTripleCount, HealthDetail, HealthPage, ObservationHit, PageAuthor, PageHit,
     PageHitWithMeta, PageLinks, PageMeta, PageSummary, ProjectSummary, ReaderPool, RelatedPage,
-    StatusCounts, StoredEmbedding, WorkspaceSummary, f32_vec_to_bytes,
+    StatusCounts, StoredEmbedding, StoredPageBody, WorkspaceSummary, f32_vec_to_bytes,
 };
 pub use users::{TOKEN_HASH_LEN, TOKEN_RAW_LEN, TokenPepper, generate_token, hash_token};
 pub use writer::WriterHandle;

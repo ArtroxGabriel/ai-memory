@@ -379,6 +379,12 @@ struct ReadPageArgs {
     /// working in (resolved from recent hook activity). **Omit unless the user explicitly names a *different* project.**
     #[serde(default)]
     project: Option<String>,
+    /// Workspace to read together with `project`. Omit to use the
+    /// current/default workspace resolution chain. Provide both to read a
+    /// page that lives in a *different* workspace (e.g. a sibling project on
+    /// a shared server).
+    #[serde(default)]
+    workspace: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1050,7 +1056,12 @@ impl AiMemoryServer {
                 None,
             ));
         };
-        let (ws, proj) = self.effective_ids(args.project.as_deref()).await;
+        // Same scope resolution as memory_query: an explicit workspace+project
+        // can target a page in a DIFFERENT workspace (a sibling project on a
+        // shared server). Plain `project` keeps the active-project chain.
+        let (ws, proj) = self
+            .effective_ids_for_read_args(args.workspace.as_deref(), args.project.as_deref())
+            .await?;
 
         let page_path = if let Some(p) = args.path {
             PagePath::new(p)
@@ -1077,22 +1088,53 @@ impl AiMemoryServer {
             ));
         };
 
-        let md = wiki
-            .read_page(ws, proj, &page_path)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-
-        let title = md
-            .frontmatter
-            .get("title")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-
-        ok_json(&serde_json::json!({
-            "path": page_path.to_string(),
-            "title": title,
-            "body": md.body,
-            "frontmatter": md.frontmatter,
-        }))
+        // Markdown on disk is the source of truth, but the on-disk read can
+        // fail when the index is momentarily ahead of disk (recently-written
+        // page, or a known watcher/disk skew — gotchas/read-page-by-query-misses).
+        // Fall back to the DB's faithful copy before surfacing an error so the
+        // agent never wrongly concludes a page it can see in search is gone.
+        match wiki.read_page(ws, proj, &page_path) {
+            Ok(md) => {
+                let title = md
+                    .frontmatter
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string);
+                ok_json(&serde_json::json!({
+                    "path": page_path.to_string(),
+                    "title": title,
+                    "body": md.body,
+                    "frontmatter": md.frontmatter,
+                }))
+            }
+            Err(disk_err) => {
+                match self
+                    .reader
+                    .page_body_by_ids(ws, proj, page_path.as_str())
+                    .await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
+                {
+                    Some(stored) => {
+                        let frontmatter: serde_json::Value =
+                            serde_json::from_str(&stored.frontmatter_json)
+                                .unwrap_or(serde_json::Value::Null);
+                        let title = frontmatter
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                            .or(Some(stored.title));
+                        ok_json(&serde_json::json!({
+                            "path": page_path.to_string(),
+                            "title": title,
+                            "body": stored.body,
+                            "frontmatter": frontmatter,
+                            "served_from": "db-fallback",
+                        }))
+                    }
+                    None => Err(McpError::internal_error(disk_err.to_string(), None)),
+                }
+            }
+        }
     }
 
     /// Create a handoff snapshot for the next agent CLI.
