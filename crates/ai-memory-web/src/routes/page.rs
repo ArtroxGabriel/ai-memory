@@ -38,7 +38,11 @@ pub(crate) async fn handler(
 
     // Drop the leading H1 — the template already renders the title
     // in its header, so leaving it in the body duplicates it.
-    let body_html = markdown::render(markdown::strip_leading_h1(&markdown_doc.body));
+    let body_html = markdown::render(
+        markdown::strip_leading_h1(&markdown_doc.body),
+        &workspace,
+        &project,
+    );
 
     let project_href = project_href(&workspace, &project);
     let supersedes_path = meta.supersedes.unwrap_or_default();

@@ -136,7 +136,11 @@ command: ["serve", "--transport", "http", "--bind", "0.0.0.0:49374", "--enable-w
 ```
 
 The web UI is read-only: project list, per-project page tree,
-breadcrumbs, rendered markdown, metadata, and FTS5 search. If the
+breadcrumbs, rendered markdown, metadata, and FTS5 search. In rendered
+pages, `[[wiki links]]` become clickable links to the target page —
+`[[path]]`, `[[path|label]]`, `[[project:path]]`, and
+`[[workspace/project:path]]` are all supported (resolved against the
+current page's project unless the target carries its own scope). If the
 server has `AI_MEMORY_AUTH_TOKEN` set, the browser uses HTTP Basic auth:
 leave the username blank and paste the token as the password. MCP and
 hook clients continue to use `Authorization: Bearer <token>`.
