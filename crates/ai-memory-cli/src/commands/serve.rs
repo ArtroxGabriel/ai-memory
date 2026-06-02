@@ -296,6 +296,7 @@ pub async fn run(config: &Config, args: ServeArgs) -> Result<()> {
                 &cors_origins,
                 &args.web_slug,
                 &base_href,
+                &base_path,
             );
             let router = apply_http_layers(router, auth_state, config.allowed_hosts.clone());
             // Host the entire surface under the configured base path. Empty
@@ -774,27 +775,45 @@ fn escape_attr(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// Inject `<base href="{href}">` immediately after the first `<head…>` tag
-/// (or prepend it when there is no head) so the served SPA's relative
-/// asset/router URLs resolve under the configured prefix.
-pub(crate) fn inject_base_href(html: &str, href: &str) -> String {
-    let tag = format!("<base href=\"{}\">", escape_attr(href));
+/// Insert `snippet` immediately after the first `<head…>` tag (or prepend
+/// it when there is no head).
+fn inject_into_head(html: &str, snippet: &str) -> String {
     if let Some(start) = html.find("<head")
         && let Some(gt) = html[start..].find('>')
     {
         let pos = start + gt + 1;
-        let mut out = String::with_capacity(html.len() + tag.len());
+        let mut out = String::with_capacity(html.len() + snippet.len());
         out.push_str(&html[..pos]);
-        out.push_str(&tag);
+        out.push_str(snippet);
         out.push_str(&html[pos..]);
         return out;
     }
-    format!("{tag}{html}")
+    format!("{snippet}{html}")
+}
+
+/// Inject `<base href="{href}">` so the served SPA's relative asset/router
+/// URLs resolve under the configured prefix.
+pub(crate) fn inject_base_href(html: &str, href: &str) -> String {
+    inject_into_head(html, &format!("<base href=\"{}\">", escape_attr(href)))
+}
+
+/// Inject `<meta name="ai-memory-base-path" content="{base_path}">` so the
+/// SPA can build API URLs as `{base_path}/api/v1`. The `<base href>` alone is
+/// ambiguous for this because it also folds in the web slug (e.g. `/web`),
+/// whereas `/api/v1` hangs off the base path, not the web mount.
+pub(crate) fn inject_base_path_meta(html: &str, base_path: &str) -> String {
+    inject_into_head(
+        html,
+        &format!(
+            "<meta name=\"ai-memory-base-path\" content=\"{}\">",
+            escape_attr(base_path)
+        ),
+    )
 }
 
 #[cfg(test)]
 mod web_base_tests {
-    use super::{inject_base_href, normalize_prefix, web_base_href};
+    use super::{inject_base_href, inject_base_path_meta, normalize_prefix, web_base_href};
 
     #[test]
     fn normalize_prefix_edge_cases() {
@@ -844,6 +863,15 @@ mod web_base_tests {
         let out = inject_base_href("<head></head>", "/a\"b/");
         assert!(out.contains("<base href=\"/a&quot;b/\">"));
     }
+
+    #[test]
+    fn inject_base_path_meta_emits_meta() {
+        let out = inject_base_path_meta("<head></head>", "/wiki");
+        assert!(out.contains("<meta name=\"ai-memory-base-path\" content=\"/wiki\">"));
+        // Empty base path => empty content (SPA falls back to root).
+        let empty = inject_base_path_meta("<head></head>", "");
+        assert!(empty.contains("content=\"\""));
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -856,6 +884,7 @@ fn mount_web_router(
     cors_origins: &[String],
     web_slug: &str,
     base_href: &str,
+    base_path: &str,
 ) -> axum::Router {
     if !enable_web {
         return router;
@@ -899,11 +928,9 @@ fn mount_web_router(
     // URLs resolve under `{base_path}{web_slug}`.
     if let Some(dir) = web_ui_dir {
         let dir = dir.to_path_buf();
-        let injected = inject_base_href(
-            &std::fs::read_to_string(dir.join("index.html")).unwrap_or_default(),
-            base_href,
-        );
-        info!(mount, base_href, "custom web UI mounted");
+        let raw = std::fs::read_to_string(dir.join("index.html")).unwrap_or_default();
+        let injected = inject_base_path_meta(&inject_base_href(&raw, base_href), base_path);
+        info!(mount, base_href, base_path, "custom web UI mounted");
         // Assets are served as files; any unmatched path (SPA client route)
         // falls back to the injected index. `append_index_html_on_directories`
         // is off so the directory index also flows through the injecting
@@ -1082,6 +1109,7 @@ mod tests {
             &[],
             "/web",
             "/web/",
+            "",
         );
         let router = apply_http_layers(
             router,
@@ -1245,6 +1273,7 @@ mod tests {
             &cors_origins,
             "/web",
             "/web/",
+            "",
         );
         // No auth layer so we can reach /api/v1 directly.
         let resp = router
@@ -1296,6 +1325,7 @@ mod tests {
             &cors_origins,
             "/web",
             "/web/",
+            "",
         );
         let resp = router
             .oneshot(
@@ -1336,6 +1366,7 @@ mod tests {
             &cors_origins,
             "/web",
             "/web/",
+            "",
         );
         // /web is a non-api route; sending an Origin header must not trigger CORS.
         let resp = router
