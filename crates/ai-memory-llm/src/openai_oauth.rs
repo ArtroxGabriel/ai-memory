@@ -388,7 +388,7 @@ fn parse_sse_response(body: &str) -> LlmResult<CodexResponsesResponse> {
                 let response = value.get("response").cloned().unwrap_or(value);
                 completed = Some(serde_json::from_value(response)?);
             }
-            "response.failed" | "error" => {
+            "response.failed" | "response.incomplete" | "response.cancelled" | "error" => {
                 return Err(LlmError::Provider {
                     status: 502,
                     body: truncate_with_ellipsis(trimmed, 1024),
@@ -744,6 +744,50 @@ mod tests {
         let usage = response.usage.expect("usage from completed event");
         assert_eq!(usage.input_tokens, 12);
         assert_eq!(usage.output_tokens, 3);
+    }
+
+    #[test]
+    fn parse_sse_response_surfaces_terminal_failure_events() {
+        for event in [
+            "response.failed",
+            "response.incomplete",
+            "response.cancelled",
+            "error",
+        ] {
+            let body = format!(
+                "event: {event}\n\
+                 data: {{\"type\":\"{event}\",\"error\":{{\"message\":\"stream stopped\"}}}}\n\n"
+            );
+
+            let err = parse_sse_response(&body).expect_err("terminal event must fail");
+            match err {
+                LlmError::Provider { status, body } => {
+                    assert_eq!(status, 502);
+                    assert!(body.contains(event), "body should include event: {body}");
+                    assert!(
+                        body.contains("stream stopped"),
+                        "body should include error: {body}"
+                    );
+                }
+                other => panic!("expected provider error for {event}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_sse_response_requires_completed_event() {
+        let body = concat!(
+            "event: response.output_text.delta\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+            "data: [DONE]\n\n",
+        );
+
+        let err = parse_sse_response(body).expect_err("missing completed event must fail");
+        assert!(
+            err.to_string()
+                .contains("stream closed before response.completed"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
