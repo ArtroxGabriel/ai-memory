@@ -168,6 +168,16 @@ impl PerActorMap {
         self.purge_expired(now);
         self.entries.get(key).map(|(ws, proj, _)| (*ws, *proj))
     }
+
+    /// Test-only: live row count in the backing HashMap. Counts all
+    /// rows, including ones whose TTL has elapsed (those are dropped
+    /// by `purge_expired` on the next read/write). The randomised cap
+    /// test uses this to verify `enforce_cap` keeps the storage bounded
+    /// at every step regardless of when expiry sweeps run.
+    #[cfg(test)]
+    fn raw_len(&self) -> usize {
+        self.entries.len()
+    }
 }
 
 /// Cheap, cloneable handle to the shared "currently active project" pointer.
@@ -332,6 +342,19 @@ impl ActiveProject {
         }
         let mut guard = self.per_actor.write().unwrap_or_else(|e| e.into_inner());
         guard.get(&scoped, Instant::now())
+    }
+
+    /// Test-only: live count of keyed entries in the per-actor backing
+    /// store, after any pending TTL expiry. Used by the randomised
+    /// invariant tests to pin `count <= max_entries` after every
+    /// operation. Counts both still-fresh and stale entries because
+    /// pre-expiry sweeping is a `get`-time concern; this helper
+    /// inspects raw storage so the cap test catches a cap violation
+    /// regardless of when expiry sweeps run.
+    #[cfg(test)]
+    fn keyed_entry_count_for_test(&self) -> usize {
+        let guard = self.per_actor.read().unwrap_or_else(|e| e.into_inner());
+        guard.raw_len()
     }
 }
 
@@ -535,5 +558,254 @@ mod tests {
         // the keyed entry expired).
         ap.clear();
         assert!(ap.get_for(&k).is_none());
+    }
+
+    // ────────────────────────────────────────────────────────────────────
+    // Randomised invariant tests.
+    //
+    // Each `prop_*` test runs a long sequence of operations driven by a
+    // tiny xorshift RNG with a fixed seed (printed on failure for
+    // repro). We assert universal invariants that must hold AFTER every
+    // operation — not just at one cherry-picked moment — so a bug in
+    // eviction order or TTL expiry that the fixed scenarios miss
+    // surfaces here.
+    //
+    // No external dep: workspace deliberately curates its dev-deps and
+    // adding `proptest` for one module is more cost than signal. The
+    // randomized fuzzing below covers the same ground for the
+    // invariants we care about; if a future regression motivates true
+    // shrinking, swap in proptest then.
+    // ────────────────────────────────────────────────────────────────────
+
+    /// Minimal xorshift64* — deterministic, ~4 cycles/step, no deps.
+    struct Rng(u64);
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            // Avoid the all-zero degenerate state.
+            Self(if seed == 0 { 0x9e37_79b9_7f4a_7c15 } else { seed })
+        }
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+        fn pick<T: Copy>(&mut self, slice: &[T]) -> T {
+            slice[(self.next() as usize) % slice.len()]
+        }
+    }
+
+    /// One operation in the randomised harness.
+    #[derive(Debug, Clone, Copy)]
+    enum Op {
+        Set(usize),    // set_for(actor_pool[idx], ws, fresh proj)
+        Get(usize),    // get_for(actor_pool[idx])
+        ClearAll,      // clear() — single + keyed
+        SetSingle,     // set(ws, fresh proj) — legacy single-slot path
+        GetSingle,     // get() — legacy single-slot path
+    }
+
+    fn run_seeded<F: FnMut(usize, &Op, &ActiveProject)>(
+        ap: &ActiveProject,
+        seed: u64,
+        steps: usize,
+        actor_pool_size: usize,
+        ws: WorkspaceId,
+        mut on_step: F,
+    ) {
+        let mut rng = Rng::new(seed);
+        let actors: Vec<ActorKey> = (0..actor_pool_size)
+            .map(|i| ActorKey {
+                user: Some(format!("user-{i}")),
+                session_id: Some(format!("sess-{i}")),
+            })
+            .collect();
+
+        let op_table = [Op::Set(0), Op::Get(0), Op::ClearAll, Op::SetSingle, Op::GetSingle];
+
+        for step in 0..steps {
+            let mut op = rng.pick(&op_table);
+            if let Op::Set(_) = op {
+                op = Op::Set((rng.next() as usize) % actor_pool_size);
+            } else if let Op::Get(_) = op {
+                op = Op::Get((rng.next() as usize) % actor_pool_size);
+            }
+
+            match op {
+                Op::Set(i) => {
+                    let proj = ProjectId::new();
+                    ap.set_for(&actors[i], ws, proj);
+                }
+                Op::Get(i) => {
+                    let _ = ap.get_for(&actors[i]);
+                }
+                Op::ClearAll => ap.clear(),
+                Op::SetSingle => {
+                    let proj = ProjectId::new();
+                    ap.set(ws, proj);
+                }
+                Op::GetSingle => {
+                    let _ = ap.get();
+                }
+            }
+
+            on_step(step, &op, ap);
+        }
+    }
+
+    /// Property: at every moment, the count of `keyed` entries must be
+    /// `<= max_entries`. The LRU evictor is the only thing keeping the
+    /// map bounded; a race that lets it grow past the cap would surface
+    /// here within a few thousand random ops.
+    #[test]
+    fn prop_keyed_entries_never_exceed_max() {
+        let ws = WorkspaceId::new();
+        for seed in [1, 42, 1337, 0xdead_beef, 0xfeed_face] {
+            let cap = 8;
+            let ap = ActiveProject::with_config(
+                ActiveProjectMode::PerActor,
+                DEFAULT_PER_KEY_TTL,
+                cap,
+            );
+            // Pool larger than cap so eviction is exercised continuously.
+            run_seeded(&ap, seed, 2_000, cap * 4, ws, |step, op, ap| {
+                let count = ap.keyed_entry_count_for_test();
+                assert!(
+                    count <= cap,
+                    "seed={seed:#x} step={step}: cap violated, count={count} > {cap} after {op:?}"
+                );
+            });
+        }
+    }
+
+    /// Property: an entry's projection through `set_for(k, _, p)` must
+    /// be observable by `keyed_only_get(k) == Some(_, p)` until either
+    /// (a) another `set_for(k, _, p')` overrides it, (b) eviction
+    /// kicks it out (only possible if cap was exceeded between writes),
+    /// or (c) the TTL passes.
+    ///
+    /// This is the "fresh write is durable" contract — the foundation
+    /// every read tool depends on.
+    #[test]
+    fn prop_fresh_write_round_trips_until_overwrite_or_evict() {
+        let ws = WorkspaceId::new();
+        for seed in [1, 99, 12_345, 0xc0ffee_u64] {
+            let cap = 16;
+            let pool_size = cap * 2;
+            let ap = ActiveProject::with_config(
+                ActiveProjectMode::PerActor,
+                Duration::from_secs(60), // long TTL — eviction stays cap-driven
+                cap,
+            );
+            let mut rng = Rng::new(seed);
+            let actors: Vec<ActorKey> = (0..pool_size)
+                .map(|i| ActorKey {
+                    user: Some(format!("user-{i}")),
+                    session_id: Some(format!("sess-{i}")),
+                })
+                .collect();
+
+            // Walk: each step picks an actor, writes a fresh project id,
+            // immediately reads back, asserts the read sees THAT id.
+            // Whether other actors' entries were evicted is fine; the
+            // write we JUST did MUST be readable.
+            for step in 0..1_000 {
+                let i = (rng.next() as usize) % pool_size;
+                let proj = ProjectId::new();
+                ap.set_for(&actors[i], ws, proj);
+                let got = ap.keyed_only_get(&actors[i]);
+                assert_eq!(
+                    got,
+                    Some((ws, proj)),
+                    "seed={seed:#x} step={step}: fresh write for actor {i} not readable; got {got:?}"
+                );
+            }
+        }
+    }
+
+    /// Property: `clear()` must wipe BOTH the single slot and every
+    /// keyed entry. Operators rely on this for tests / admin-driven
+    /// reset; a partial clear would leak stale routing.
+    #[test]
+    fn prop_clear_wipes_all_slots() {
+        let ws = WorkspaceId::new();
+        for seed in [1_u64, 7, 314_159, 271_828, 161_803] {
+            let ap = ActiveProject::with_config(
+                ActiveProjectMode::PerActor,
+                DEFAULT_PER_KEY_TTL,
+                64,
+            );
+            run_seeded(&ap, seed, 500, 8, ws, |_step, _op, _ap| {});
+            // After arbitrary ops, clear and assert emptiness from every
+            // angle. Use a fresh actor key not seen in the run.
+            ap.clear();
+            assert!(ap.get().is_none(), "seed={seed:#x}: single slot not cleared");
+            assert!(
+                ap.keyed_only_get(&ActorKey {
+                    user: Some("post-clear-probe".into()),
+                    session_id: Some("post-clear".into()),
+                })
+                .is_none(),
+                "seed={seed:#x}: keyed lookup after clear must be None"
+            );
+            assert_eq!(
+                ap.keyed_entry_count_for_test(),
+                0,
+                "seed={seed:#x}: keyed_entry_count after clear must be 0"
+            );
+        }
+    }
+
+    /// Property: TTL is monotonic in time — once an entry has expired
+    /// (the per-key TTL has elapsed since its last `set_for`), no
+    /// `get_for` lookup should ever see it again via the *keyed* path.
+    /// The single-slot fallback is allowed (graceful degradation).
+    #[test]
+    fn prop_expired_entry_is_not_resurrected_via_keyed_path() {
+        let ws = WorkspaceId::new();
+        for seed in [1_u64, 11, 222, 3_333] {
+            let ttl = Duration::from_millis(40);
+            let ap = ActiveProject::with_config(ActiveProjectMode::PerActor, ttl, 32);
+            let mut rng = Rng::new(seed);
+            let actors: Vec<ActorKey> = (0..8)
+                .map(|i| ActorKey {
+                    user: Some(format!("u-{i}")),
+                    session_id: Some(format!("s-{i}")),
+                })
+                .collect();
+
+            // Pre-populate every actor; record the write time relative
+            // to the run start.
+            for actor in &actors {
+                ap.set_for(actor, ws, ProjectId::new());
+            }
+
+            // Wait for TTL plus a margin so every pre-populated entry
+            // is logically expired.
+            std::thread::sleep(ttl + Duration::from_millis(30));
+
+            // Now hit each actor with `keyed_only_get`. None of them
+            // should resurrect: even though `get_for` would fall back
+            // to the single slot, `keyed_only_get` must return None.
+            for (idx, actor) in actors.iter().enumerate() {
+                assert!(
+                    ap.keyed_only_get(actor).is_none(),
+                    "seed={seed:#x} idx={idx}: expired keyed entry resurrected"
+                );
+            }
+
+            // Cross-check that fresh writes still work after expiry —
+            // the map shouldn't go into an unrecoverable state.
+            let i = (rng.next() as usize) % actors.len();
+            let proj = ProjectId::new();
+            ap.set_for(&actors[i], ws, proj);
+            assert_eq!(
+                ap.keyed_only_get(&actors[i]),
+                Some((ws, proj)),
+                "seed={seed:#x}: fresh post-expiry write must round-trip"
+            );
+        }
     }
 }
