@@ -18,4 +18,10 @@ QS=$(ai_memory_marker_qs "$CWD")
 
 printf '%s' "$PAYLOAD" \
     | ai_memory_post_hook "$SERVER/hook?event=pre-compact&agent=claude-code${QS}" >/dev/null 2>&1 || true
+# Acknowledge to Claude Code with an empty JSON object. This hook only
+# POSTs (fire-and-forget) and injects no context; without "{" on stdout
+# Claude Code treats the (empty) output as plain text and logs
+# "Hook output does not start with {, treating as plain text".
+# Emitting {} keeps the debug log clean.
+printf '{}\n'
 exit 0

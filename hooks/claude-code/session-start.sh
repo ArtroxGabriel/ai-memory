@@ -24,5 +24,17 @@ QS=$(ai_memory_marker_qs "$CWD")
 printf '%s' "$PAYLOAD" \
     | ai_memory_post_hook "$SERVER/hook?event=session-start&agent=claude-code${QS}" >/dev/null 2>&1 || true
 
-ai_memory_get_handoff "$SERVER/handoff?agent=claude-code${QS}" 2>/dev/null || true
+# Claude Code prepends a SessionStart hook's stdout to the resuming
+# session as context. Emit it as structured JSON
+# (hookSpecificOutput.additionalContext) instead of raw text: bare text
+# does not start with "{", so Claude Code logs every session start as
+# "Hook output does not start with {, treating as plain text". JSON
+# injects the same handoff with a clean debug log; no handoff -> "{}".
+HANDOFF=$(ai_memory_get_handoff "$SERVER/handoff?agent=claude-code${QS}" 2>/dev/null || true)
+if [ -n "$HANDOFF" ]; then
+    printf '{"hookSpecificOutput":{"hookEventName":"SessionStart","additionalContext":%s}}\n' \
+        "$(printf '%s' "$HANDOFF" | ai_memory_json_string)"
+else
+    printf '{}\n'
+fi
 exit 0

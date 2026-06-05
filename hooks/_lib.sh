@@ -117,14 +117,17 @@ ai_memory_get_handoff() {
     fi
 }
 
-# Encode stdin as a JSON string. Used only by Antigravity's PreInvocation
-# hook, whose stdout contract is JSON rather than raw context text.
+# Encode stdin as a JSON string (with surrounding quotes). Used by hooks
+# whose stdout contract is JSON rather than raw context text: Antigravity's
+# PreInvocation hook and Claude Code's session-start hook (which wraps the
+# handoff in hookSpecificOutput.additionalContext).
 ai_memory_json_string() {
     awk '
         BEGIN { printf "\"" }
         {
             gsub(/\\/, "\\\\")
             gsub(/"/, "\\\"")
+            gsub(/\t/, "\\t")
             gsub(/\r/, "\\r")
             printf "%s%s", sep, $0
             sep = "\\n"
