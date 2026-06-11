@@ -31,7 +31,7 @@
 | Claude Desktop | MCP-only | Uses `mcp-remote`; no lifecycle hooks. |
 | OpenClaw | Supported | MCP config + native plugin lifecycle hooks. |
 | Antigravity CLI | Supported | MCP config (`serverUrl`) + lifecycle hooks (`agy` alias). |
-| LLM providers | Supported | Anthropic, OpenAI, OpenAI OAuth/Codex, GitHub Copilot, Gemini, and OpenAI-compatible endpoints. |
+| LLM/auth providers | Supported | Anthropic, OpenAI, OpenAI OAuth/Codex, GitHub Copilot, Gemini, OpenAI-compatible endpoints, and generic OIDC device auth for native hooks. |
 | Embedding providers | Supported | OpenAI, Voyage, and Google Gemini. |
 
 ## What it is
@@ -303,6 +303,23 @@ Bearer auth protects `/mcp`, `/hook`, `/handoff`, `/admin/*`, and
 `/web/*`. Browser access to `/web` uses HTTP Basic auth with the token
 as the password. Non-loopback binds should also set
 `AI_MEMORY_ALLOWED_HOSTS` to guard against DNS rebinding.
+
+For shared servers where each developer should authenticate their own hook
+writes, native Claude Code hooks can use a stored OIDC device token instead of
+embedding a shared static token:
+
+```bash
+ai-memory auth login oidc-device \
+    --issuer "https://issuer.example.com/realms/team" \
+    --client-id "ai-memory-cli"
+
+ai-memory install-hooks --agent claude-code --apply \
+    --server-url "http://<server-ip>:49374"
+```
+
+OIDC hook auth requires the native `ai-memory hook ...` command path. The Docker
+wrapper keeps shell-script hooks by default; set up OIDC from a native release
+binary or source install.
 
 **Want HTTPS?** ai-memory deliberately does not terminate TLS itself —
 the right answer is a battle-tested reverse proxy in front of it.

@@ -282,8 +282,17 @@ sudo -u ai-memory ai-memory \
   auth login openai-oauth
 ```
 
-Use `auth login copilot` the same way for GitHub Copilot. Restart the service
-after changing provider settings:
+Use `auth login copilot` the same way for GitHub Copilot. For per-developer
+native hook auth against an OIDC issuer, run `auth login oidc-device` in the
+developer's selected data dir instead:
+
+```bash
+ai-memory auth login oidc-device \
+  --issuer "https://issuer.example.com/realms/team" \
+  --client-id "ai-memory-cli"
+```
+
+Restart the service after changing provider settings:
 
 ```bash
 systemctl --user restart ai-memory.service      # user mode
@@ -868,6 +877,7 @@ docker run --rm akitaonrails/ai-memory:latest --help     # full subcommand tree
 | `generate-auth-token` | `docker run --rm` | Print a random hex bearer token |
 | `auth login openai-oauth` | same data volume as the server | Store a ChatGPT/Codex OAuth refresh token for the optional `openai-oauth` LLM provider |
 | `auth login copilot` | same data volume as the server | Store a GitHub token for the optional `copilot` LLM provider |
+| `auth login oidc-device` | same developer data dir as native hooks | Store a per-developer OIDC device token for native hook authentication |
 | `install-mcp --client` | `docker run --rm` | MCP-config snippet per client |
 | `install-hooks --agent` | `docker run --rm` | Hook-config snippet for an existing hooks dir |
 | `setup-agent --agent --to --host-prefix` | `docker run --rm -v` | Extract bundled scripts + print config (one-shot) |

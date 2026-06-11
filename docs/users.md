@@ -285,8 +285,7 @@ the bearer authenticates, attribution flows from the token's owner
 - **Root token is single.** `[auth].bearer_token` is the admin token
   for operational `/admin/*` endpoints. DB users created with
   `user add` are normal users, not additional admins.
-- **No federation / OIDC / OAuth.** Per
-  [`design-decisions.md`](design-decisions.md) §13, ai-memory v1
-  stays self-contained. If you need SSO, terminate it at a
-  reverse proxy and configure the proxy to inject
-  `Authorization: Bearer <root-token>`.
+- **OIDC is hook authentication, not page authorization.** Native hooks can use
+  a per-developer OIDC device token, but ai-memory still has one shared wiki per
+  server and no per-page RBAC. If you need data isolation, run separate
+  ai-memory servers or isolate at a reverse proxy.

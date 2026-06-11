@@ -24,9 +24,9 @@ use crate::commands::apply_shared::{ApplyOutcome, apply_atomic, mutate_json};
 use crate::commands::install_mcp;
 use crate::commands::openclaw_plugin;
 use crate::commands::render_shared::{
-    CURSOR_PROFILE, GEMINI_PROFILE, build_antigravity_payload, build_claude_code_payload,
-    build_codex_payload, build_profile_payload, hook_script_for_claude_code,
-    hook_script_for_current_platform, ts_string_literal,
+    CURSOR_PROFILE, GEMINI_PROFILE, build_antigravity_payload_with_data_dir,
+    build_claude_code_payload_with_data_dir, build_profile_payload_for_agent,
+    hook_script_for_claude_code, hook_script_for_current_platform, ts_string_literal,
 };
 use crate::config::{Config, DEFAULT_SERVER_URL};
 
@@ -126,23 +126,35 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
             AgentChoice::Omp => apply_to_omp_extension(&server_url, auth, &args),
             AgentChoice::ClaudeCode => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_claude_code_settings(&hooks_dir, &server_url, auth, &args)
+                apply_to_claude_code_settings(
+                    &hooks_dir,
+                    &server_url,
+                    auth,
+                    &config.data_dir,
+                    &args,
+                )
             }
             AgentChoice::Codex => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_codex_settings(&hooks_dir, &server_url, auth, &args)
+                apply_to_codex_settings(&hooks_dir, &server_url, auth, &config.data_dir, &args)
             }
             AgentChoice::Cursor => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_cursor_settings(&hooks_dir, &server_url, auth, &args)
+                apply_to_cursor_settings(&hooks_dir, &server_url, auth, &config.data_dir, &args)
             }
             AgentChoice::GeminiCli => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_gemini_settings(&hooks_dir, &server_url, auth, &args)
+                apply_to_gemini_settings(&hooks_dir, &server_url, auth, &config.data_dir, &args)
             }
             AgentChoice::AntigravityCli => {
                 let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-                apply_to_antigravity_settings(&hooks_dir, &server_url, auth, &args)
+                apply_to_antigravity_settings(
+                    &hooks_dir,
+                    &server_url,
+                    auth,
+                    &config.data_dir,
+                    &args,
+                )
             }
             AgentChoice::Openclaw => openclaw_plugin::apply(&server_url, auth, &args),
         };
@@ -152,7 +164,7 @@ pub fn run(config: &Config, args: InstallHooksArgs) -> Result<()> {
         AgentChoice::Omp => render_omp_extension(&server_url, auth),
         AgentChoice::ClaudeCode => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
-            render_claude_code(&hooks_dir, &server_url, auth)
+            render_claude_code(&hooks_dir, &server_url, auth, &config.data_dir)
         }
         AgentChoice::Codex => {
             let hooks_dir = resolve_hooks_dir(args.hooks_dir.as_deref(), args.agent)?;
@@ -419,6 +431,7 @@ fn apply_to_claude_code_settings(
     hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let path = match &args.config_file {
@@ -427,7 +440,12 @@ fn apply_to_claude_code_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "claude-code")?;
     let command_dir = staged_command_dir(&staged, "claude-code");
-    let payload = build_claude_code_payload(&command_dir, server_url, auth_token);
+    let payload = build_claude_code_payload_with_data_dir(
+        &command_dir,
+        server_url,
+        auth_token,
+        Some(data_dir),
+    );
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -491,6 +509,7 @@ fn apply_to_codex_settings(
     hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let path = match &args.config_file {
@@ -499,7 +518,7 @@ fn apply_to_codex_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "codex")?;
     let command_dir = staged_command_dir(&staged, "codex");
-    let outcome = merge_codex_hooks(&command_dir, server_url, auth_token, &path)?;
+    let outcome = merge_codex_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -528,12 +547,20 @@ fn merge_codex_hooks(
     staged: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
     // Build the Codex-flavoured payload. The JSON shape is identical
     // to Claude Code's matcher + nested hooks form — only the event
     // list differs (no `SessionEnd`, which Codex doesn't recognise).
-    let payload = build_codex_payload(staged, server_url, auth_token);
+    let payload = build_profile_payload_for_agent(
+        &super::render_shared::CODEX_PROFILE,
+        staged,
+        server_url,
+        auth_token,
+        "codex",
+        Some(data_dir),
+    );
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -583,6 +610,7 @@ fn apply_to_cursor_settings(
     hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let path = match &args.config_file {
@@ -591,7 +619,7 @@ fn apply_to_cursor_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "cursor")?;
     let command_dir = staged_command_dir(&staged, "cursor");
-    let outcome = merge_cursor_hooks(&command_dir, server_url, auth_token, &path)?;
+    let outcome = merge_cursor_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -609,9 +637,17 @@ fn merge_cursor_hooks(
     staged: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
-    let payload = build_profile_payload(&CURSOR_PROFILE, staged, server_url, auth_token);
+    let payload = build_profile_payload_for_agent(
+        &CURSOR_PROFILE,
+        staged,
+        server_url,
+        auth_token,
+        "cursor",
+        Some(data_dir),
+    );
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -656,6 +692,7 @@ fn apply_to_gemini_settings(
     hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let path = match &args.config_file {
@@ -664,7 +701,7 @@ fn apply_to_gemini_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "gemini-cli")?;
     let command_dir = staged_command_dir(&staged, "gemini-cli");
-    let outcome = merge_gemini_hooks(&command_dir, server_url, auth_token, &path)?;
+    let outcome = merge_gemini_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -682,9 +719,17 @@ fn merge_gemini_hooks(
     staged: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
-    let payload = build_profile_payload(&GEMINI_PROFILE, staged, server_url, auth_token);
+    let payload = build_profile_payload_for_agent(
+        &GEMINI_PROFILE,
+        staged,
+        server_url,
+        auth_token,
+        "gemini-cli",
+        Some(data_dir),
+    );
     let our_hooks = payload
         .get("hooks")
         .and_then(|v| v.as_object())
@@ -721,6 +766,7 @@ fn apply_to_antigravity_settings(
     hooks_dir: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     args: &InstallHooksArgs,
 ) -> Result<()> {
     let path = match &args.config_file {
@@ -729,7 +775,7 @@ fn apply_to_antigravity_settings(
     };
     let staged = stage_hook_scripts(hooks_dir, "antigravity-cli")?;
     let command_dir = staged_command_dir(&staged, "antigravity-cli");
-    let outcome = merge_antigravity_hooks(&command_dir, server_url, auth_token, &path)?;
+    let outcome = merge_antigravity_hooks(&command_dir, server_url, auth_token, data_dir, &path)?;
     println!(
         "✓ {} {} ({})",
         outcome.verb(),
@@ -747,9 +793,11 @@ fn merge_antigravity_hooks(
     staged: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: &Path,
     config_path: &Path,
 ) -> Result<ApplyOutcome> {
-    let payload = build_antigravity_payload(staged, server_url, auth_token);
+    let payload =
+        build_antigravity_payload_with_data_dir(staged, server_url, auth_token, Some(data_dir));
     let our_group = payload
         .get("ai-memory")
         .and_then(|v| v.as_object())
@@ -1645,7 +1693,12 @@ fn repo_root_guess() -> Option<PathBuf> {
 // CLAUDE_CODE_EVENTS + build_claude_code_payload now live in
 // `super::render_shared`, shared with `setup-agent`.
 
-fn render_claude_code(hooks_dir: &Path, server_url: &str, auth_token: Option<&str>) -> Result<()> {
+fn render_claude_code(
+    hooks_dir: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    data_dir: &Path,
+) -> Result<()> {
     // Soft check: warn (don't bail) if a script is missing. The user
     // may be running this command inside docker against a host path
     // that exists only on the host's filesystem — bailing would
@@ -1663,7 +1716,8 @@ fn render_claude_code(hooks_dir: &Path, server_url: &str, auth_token: Option<&st
             );
         }
     }
-    let payload = build_claude_code_payload(hooks_dir, server_url, auth_token);
+    let payload =
+        build_claude_code_payload_with_data_dir(hooks_dir, server_url, auth_token, Some(data_dir));
     let serialized =
         serde_json::to_string_pretty(&payload).context("serializing claude code hook config")?;
     println!("# Claude Code hook config — merge into ~/.claude/settings.json");
@@ -2478,6 +2532,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2524,6 +2579,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2537,6 +2593,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2571,6 +2628,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2615,6 +2673,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2658,6 +2717,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2715,6 +2775,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2765,6 +2826,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();
@@ -2778,6 +2840,7 @@ model = "gpt-5"
             hooks_tmp.path(),
             "http://127.0.0.1:49374",
             None,
+            config_tmp.path(),
             &config_path,
         )
         .unwrap();

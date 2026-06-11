@@ -6,6 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+### Added
+- Native Claude Code hooks on macOS/Linux now use the direct
+  `ai-memory hook --event ...` command by default, matching native Windows.
+  Native hook commands spool events locally and can authenticate with a stored
+  per-developer OIDC device token instead of a shared static hook token.
+- `ai-memory auth login oidc-device --issuer <url> --client-id <id>` stores a
+  generic OIDC device-flow token for native hook authentication.
+
+### Fixed
+- `ai-memory uninstall --only hooks` now recognizes and removes native
+  `ai-memory hook ...` commands as well as legacy script commands.
 
 ## [0.15.0] - 2026-06-11
 ### Added

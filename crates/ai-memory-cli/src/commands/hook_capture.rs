@@ -151,13 +151,34 @@ pub async fn get_handoff(
     if let Some(t) = token {
         req = req.bearer_auth(t);
     }
-    let body = req.send().await.ok()?.text().await.ok()?;
+    let resp = req.send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let body = resp.text().await.ok()?;
     if body.is_empty() { None } else { Some(body) }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve_once(status: &'static str, body: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        format!("http://{addr}/handoff")
+    }
 
     #[test]
     fn extracts_top_level_cwd() {
@@ -197,6 +218,13 @@ mod tests {
         )
         .await;
         assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn get_handoff_ignores_non_success_status() {
+        let url = serve_once("401 Unauthorized", "unauthorized").await;
+        let got = get_handoff(&build_client(), &url, None, Duration::from_secs(1)).await;
+        assert!(got.is_none(), "non-2xx body must not become context");
     }
 
     /// Happy-path TOML parser: extracts each declared root-level

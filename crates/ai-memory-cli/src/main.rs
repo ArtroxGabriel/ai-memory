@@ -26,7 +26,11 @@ use config::Config;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let Cli {
+        data_dir,
+        config: config_path,
+        command,
+    } = Cli::parse();
 
     // Hooks fire on every tool call: they must be cheap and must emit ONLY
     // their JSON object to stdout. Short-circuit before config load and
@@ -34,17 +38,12 @@ async fn main() -> Result<()> {
     // its server URL + token from flags; it only needs the data-dir to locate
     // a stored OIDC token when no explicit `--auth-token` is given, so we pass
     // the bare path rather than loading the full config.
-    if matches!(cli.command, Command::Hook(_)) {
-        let data_dir = cli.data_dir.clone();
-        let Command::Hook(args) = cli.command else {
-            unreachable!()
-        };
-        return commands::hook::run(data_dir, args).await;
-    }
+    let command = match command {
+        Command::Hook(args) => return commands::hook::run(data_dir, args).await,
+        other => other,
+    };
 
-    let config_path = cli.config.clone();
-
-    let config = Arc::new(Config::load(cli.config.as_deref(), cli.data_dir.clone())?);
+    let config = Arc::new(Config::load(config_path.as_deref(), data_dir)?);
     let _logging_guard = logging::init(&config)?;
 
     info!(
@@ -54,7 +53,7 @@ async fn main() -> Result<()> {
         "ai-memory starting",
     );
 
-    match cli.command {
+    match command {
         Command::Init(args) => commands::init::run(&config, args, config_path.as_deref()),
         Command::Status(args) => commands::status::run(&config, args).await,
         Command::Search(args) => commands::search::run(&config, args).await,
@@ -68,7 +67,7 @@ async fn main() -> Result<()> {
         Command::Reindex(args) => commands::reindex::run(&config, args).await,
         Command::InstallHooks(args) => commands::install_hooks::run(&config, args),
         // `Hook` is handled in the fast-path above (before config/tracing).
-        Command::Hook(_) => unreachable!("hook handled before config load"),
+        Command::Hook(args) => commands::hook::run(Some(config.data_dir.clone()), args).await,
         Command::InstallMcp(args) => commands::install_mcp::run(&config, args),
         Command::Commit(args) => commands::commit::run(&config, args).await,
         Command::Checkpoints(args) => commands::checkpoints::run(&config, args).await,

@@ -103,7 +103,31 @@ pub(crate) fn build_claude_code_payload(
         server_url,
         auth_token,
         HookShape::Nested,
-        HookCommandPlatform::for_bash_runner(),
+        HookCommandContext::new(
+            HookCommandPlatform::for_bash_script_runner(),
+            "claude-code",
+            None,
+        ),
+    )
+}
+
+pub(crate) fn build_claude_code_payload_with_data_dir(
+    emit_root: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    data_dir: Option<&Path>,
+) -> serde_json::Value {
+    build_hook_payload_for_platform(
+        &CLAUDE_CODE_EVENTS,
+        emit_root,
+        server_url,
+        auth_token,
+        HookShape::Nested,
+        HookCommandContext::new(
+            HookCommandPlatform::for_bash_runner(),
+            "claude-code",
+            data_dir,
+        ),
     )
 }
 
@@ -223,17 +247,19 @@ pub(crate) const ANTIGRAVITY_LIFECYCLE_EVENTS: [(&str, &str); 2] =
 /// list where matcher is ignored.
 ///
 /// The output is `{ "ai-memory": { <events> } }`.
-#[must_use]
-pub(crate) fn build_antigravity_payload(
+pub(crate) fn build_antigravity_payload_with_data_dir(
     emit_root: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+    data_dir: Option<&Path>,
 ) -> serde_json::Value {
     build_antigravity_payload_for_platform(
         emit_root,
         server_url,
         auth_token,
         HookCommandPlatform::current(),
+        "antigravity-cli",
+        data_dir,
     )
 }
 
@@ -242,6 +268,8 @@ fn build_antigravity_payload_for_platform(
     server_url: &str,
     auth_token: Option<&str>,
     platform: HookCommandPlatform,
+    agent: &str,
+    data_dir: Option<&Path>,
 ) -> serde_json::Value {
     let mut group = serde_json::Map::new();
 
@@ -249,7 +277,12 @@ fn build_antigravity_payload_for_platform(
     for (event, script) in &ANTIGRAVITY_TOOL_EVENTS {
         let s = script_for_platform(script, platform);
         let abs = emit_root.join(s.as_ref());
-        let command = hook_command(&abs, server_url, auth_token, platform);
+        let command = hook_command(
+            &abs,
+            server_url,
+            auth_token,
+            HookCommandContext::new(platform, agent, data_dir),
+        );
         group.insert(
             (*event).to_string(),
             json!([{
@@ -266,7 +299,12 @@ fn build_antigravity_payload_for_platform(
     for (event, script) in &ANTIGRAVITY_LIFECYCLE_EVENTS {
         let s = script_for_platform(script, platform);
         let abs = emit_root.join(s.as_ref());
-        let command = hook_command(&abs, server_url, auth_token, platform);
+        let command = hook_command(
+            &abs,
+            server_url,
+            auth_token,
+            HookCommandContext::new(platform, agent, data_dir),
+        );
         group.insert(
             (*event).to_string(),
             json!([{
@@ -279,25 +317,34 @@ fn build_antigravity_payload_for_platform(
     json!({ "ai-memory": group })
 }
 
-/// Build a Codex-flavoured hook payload. Thin alias for back-compat;
-/// new code should call `build_profile_payload(&CODEX_PROFILE, …)`.
-pub(crate) fn build_codex_payload(
-    emit_root: &Path,
-    server_url: &str,
-    auth_token: Option<&str>,
-) -> serde_json::Value {
-    build_profile_payload(&CODEX_PROFILE, emit_root, server_url, auth_token)
-}
-
 /// Build a hook payload for `profile`. The output is always
 /// `{ "hooks": { "<EventName>": <profile-specific-array> } }`; the
 /// caller is responsible for any sibling top-level keys (e.g.
 /// Cursor's `"version": 1`).
+#[cfg(test)]
 pub(crate) fn build_profile_payload(
     profile: &HookProfile,
     emit_root: &Path,
     server_url: &str,
     auth_token: Option<&str>,
+) -> serde_json::Value {
+    build_profile_payload_for_agent(
+        profile,
+        emit_root,
+        server_url,
+        auth_token,
+        "claude-code",
+        None,
+    )
+}
+
+pub(crate) fn build_profile_payload_for_agent(
+    profile: &HookProfile,
+    emit_root: &Path,
+    server_url: &str,
+    auth_token: Option<&str>,
+    agent: &str,
+    data_dir: Option<&Path>,
 ) -> serde_json::Value {
     build_hook_payload(
         profile.events,
@@ -305,6 +352,7 @@ pub(crate) fn build_profile_payload(
         server_url,
         auth_token,
         profile.shape,
+        HookCommandContext::new(HookCommandPlatform::current(), agent, data_dir),
     )
 }
 
@@ -314,15 +362,9 @@ fn build_hook_payload(
     server_url: &str,
     auth_token: Option<&str>,
     shape: HookShape,
+    context: HookCommandContext<'_>,
 ) -> serde_json::Value {
-    build_hook_payload_for_platform(
-        events,
-        emit_root,
-        server_url,
-        auth_token,
-        shape,
-        HookCommandPlatform::current(),
-    )
+    build_hook_payload_for_platform(events, emit_root, server_url, auth_token, shape, context)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -348,6 +390,27 @@ pub(crate) enum HookCommandPlatform {
     /// (the host has no local binary). Override with
     /// `AI_MEMORY_HOOK_PLATFORM=posix` to get the shell scripts.
     PosixNative,
+}
+
+#[derive(Clone, Copy)]
+struct HookCommandContext<'a> {
+    platform: HookCommandPlatform,
+    agent: &'a str,
+    data_dir: Option<&'a Path>,
+}
+
+impl<'a> HookCommandContext<'a> {
+    const fn new(
+        platform: HookCommandPlatform,
+        agent: &'a str,
+        data_dir: Option<&'a Path>,
+    ) -> Self {
+        Self {
+            platform,
+            agent,
+            data_dir,
+        }
+    }
 }
 
 impl HookCommandPlatform {
@@ -384,6 +447,23 @@ impl HookCommandPlatform {
             _ => Self::PosixNative,
         }
     }
+
+    /// Script fallback for setup-agent / docker-host snippets. Respects an
+    /// explicit override, but defaults to the shell command because setup-agent
+    /// copies scripts, not a host-local native binary.
+    fn for_bash_script_runner() -> Self {
+        match std::env::var("AI_MEMORY_HOOK_PLATFORM") {
+            Ok(v) if v.eq_ignore_ascii_case("windows") => Self::Windows,
+            Ok(v) if v.eq_ignore_ascii_case("posix") || v.eq_ignore_ascii_case("unix") => {
+                Self::Posix
+            }
+            Ok(v) if v.eq_ignore_ascii_case("windows-bash") => Self::WindowsBash,
+            Ok(v) if v.eq_ignore_ascii_case("windows-native") => Self::WindowsNative,
+            Ok(v) if v.eq_ignore_ascii_case("posix-native") => Self::PosixNative,
+            _ if cfg!(windows) => Self::WindowsBash,
+            _ => Self::Posix,
+        }
+    }
 }
 
 fn build_hook_payload_for_platform(
@@ -392,11 +472,11 @@ fn build_hook_payload_for_platform(
     server_url: &str,
     auth_token: Option<&str>,
     shape: HookShape,
-    platform: HookCommandPlatform,
+    context: HookCommandContext<'_>,
 ) -> serde_json::Value {
     let mut hooks_block = serde_json::Map::new();
     for (event, script) in events {
-        let script = script_for_platform(script, platform);
+        let script = script_for_platform(script, context.platform);
         let abs = emit_root.join(script.as_ref());
 
         // Claude Code's hook schema (per
@@ -422,7 +502,7 @@ fn build_hook_payload_for_platform(
         //      `hooks/claude-code/session-start.sh` etc.), so no
         //      script changes are required on POSIX. Windows uses an
         //      explicit PowerShell command with equivalent env setup.
-        let command = hook_command(&abs, server_url, auth_token, platform);
+        let command = hook_command(&abs, server_url, auth_token, context);
 
         // Empty matcher = fire on every event of this kind. Right
         // for ai-memory's capture hooks (every prompt, every tool
@@ -471,9 +551,9 @@ fn hook_command(
     script: &Path,
     server_url: &str,
     auth_token: Option<&str>,
-    platform: HookCommandPlatform,
+    context: HookCommandContext<'_>,
 ) -> String {
-    match platform {
+    match context.platform {
         HookCommandPlatform::Posix => {
             let mut prefix = format!("AI_MEMORY_HOOK_URL={} ", shell_quote(server_url));
             if let Some(t) = auth_token {
@@ -523,9 +603,11 @@ fn hook_command(
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
             let mut cmd = format!(
-                "{} hook --event {event} --agent claude-code --server-url {}",
+                "{}{} hook --event {event} --agent {agent} --server-url {}",
                 win_double_quote(&exe),
+                native_data_dir_arg(context.data_dir, NativeQuote::Windows),
                 win_double_quote(server_url),
+                agent = context.agent,
             );
             if let Some(t) = auth_token {
                 cmd.push_str(&format!(" --auth-token {}", win_double_quote(t)));
@@ -545,15 +627,34 @@ fn hook_command(
                 .and_then(|s| s.to_str())
                 .unwrap_or_default();
             let mut cmd = format!(
-                "{} hook --event {event} --agent claude-code --server-url {}",
+                "{}{} hook --event {event} --agent {agent} --server-url {}",
                 shell_quote(&exe),
+                native_data_dir_arg(context.data_dir, NativeQuote::Posix),
                 shell_quote(server_url),
+                agent = context.agent,
             );
             if let Some(t) = auth_token {
                 cmd.push_str(&format!(" --auth-token {}", shell_quote(t)));
             }
             cmd
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum NativeQuote {
+    Posix,
+    Windows,
+}
+
+fn native_data_dir_arg(data_dir: Option<&Path>, quote: NativeQuote) -> String {
+    let Some(data_dir) = data_dir else {
+        return String::new();
+    };
+    let path = data_dir.to_string_lossy();
+    match quote {
+        NativeQuote::Posix => format!(" --data-dir {}", shell_quote(&path)),
+        NativeQuote::Windows => format!(" --data-dir {}", win_double_quote(&path)),
     }
 }
 
@@ -620,7 +721,7 @@ mod tests {
             server_url,
             auth_token,
             shape,
-            HookCommandPlatform::Posix,
+            HookCommandContext::new(HookCommandPlatform::Posix, "claude-code", None),
         )
     }
 
@@ -848,7 +949,7 @@ mod tests {
             "http://h:49374",
             Some("tok"),
             HookShape::Nested,
-            HookCommandPlatform::WindowsNative,
+            HookCommandContext::new(HookCommandPlatform::WindowsNative, "claude-code", None),
         );
         // Each native command must carry `hook --event <stem>` where <stem>
         // matches the .sh script the other platforms invoke — so the server
@@ -905,7 +1006,7 @@ mod tests {
             &PathBuf::from("/tmp/hooks dir/session-start.sh"),
             "http://localhost:49374/mcp?x=1&y=2",
             Some("tok;rm -rf /"),
-            HookCommandPlatform::Posix,
+            HookCommandContext::new(HookCommandPlatform::Posix, "claude-code", None),
         );
 
         assert!(
@@ -931,7 +1032,7 @@ mod tests {
             "http://localhost:49374",
             Some("tok'en"),
             HookShape::Nested,
-            HookCommandPlatform::Windows,
+            HookCommandContext::new(HookCommandPlatform::Windows, "claude-code", None),
         );
         let cmd = v
             .pointer("/hooks/SessionStart/0/hooks/0/command")
@@ -958,6 +1059,8 @@ mod tests {
             "http://localhost:49374",
             Some("tok"),
             HookCommandPlatform::Posix,
+            "antigravity-cli",
+            None,
         );
 
         // Top-level key is the named group "ai-memory", not "hooks"
@@ -1060,7 +1163,7 @@ mod tests {
             ),
             "https://my-server.example.com",
             Some("tok123"),
-            HookCommandPlatform::WindowsBash,
+            HookCommandContext::new(HookCommandPlatform::WindowsBash, "claude-code", None),
         );
         assert!(
             cmd.starts_with("bash -c "),
@@ -1090,7 +1193,7 @@ mod tests {
             &PathBuf::from(r"C:\Users\alice\hooks\session-start.sh"),
             "http://localhost:49374",
             None,
-            HookCommandPlatform::WindowsBash,
+            HookCommandContext::new(HookCommandPlatform::WindowsBash, "claude-code", None),
         );
         assert!(cmd.starts_with("bash -c "));
         assert!(
@@ -1111,7 +1214,7 @@ mod tests {
             &PathBuf::from("/home/alice/.local/share/ai-memory/hooks/claude-code/session-start.sh"),
             "https://my-server.example.com",
             Some("tok123"),
-            HookCommandPlatform::PosixNative,
+            HookCommandContext::new(HookCommandPlatform::PosixNative, "claude-code", None),
         );
         assert!(
             cmd.contains("hook --event session-start"),
@@ -1136,9 +1239,18 @@ mod tests {
             &PathBuf::from("/home/alice/hooks/pre-tool-use.sh"),
             "http://localhost:49374",
             None,
-            HookCommandPlatform::PosixNative,
+            HookCommandContext::new(
+                HookCommandPlatform::PosixNative,
+                "codex",
+                Some(Path::new("/home/alice/.local/share/custom memory")),
+            ),
         );
         assert!(cmd.contains("hook --event pre-tool-use"), "{cmd}");
+        assert!(cmd.contains("--agent codex"), "{cmd}");
+        assert!(
+            cmd.contains("--data-dir '/home/alice/.local/share/custom memory'"),
+            "{cmd}"
+        );
         assert!(!cmd.contains("--auth-token"), "no token expected: {cmd}");
     }
 
@@ -1151,7 +1263,7 @@ mod tests {
             "https://my-server.example.com",
             Some("tok123"),
             HookShape::Nested,
-            HookCommandPlatform::WindowsBash,
+            HookCommandContext::new(HookCommandPlatform::WindowsBash, "claude-code", None),
         );
         let cmd = v
             .pointer("/hooks/SessionStart/0/hooks/0/command")

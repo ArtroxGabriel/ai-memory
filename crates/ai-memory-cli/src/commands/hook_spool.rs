@@ -33,6 +33,12 @@ const MAX_ATTEMPTS: u32 = 8;
 /// Drop a spooled event older than this regardless of attempts (7 days), so a
 /// long-dead instance can't leave the spool growing without bound.
 const MAX_AGE_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+/// Hard cap on queued events per data dir. Enqueue prunes oldest files beyond
+/// this so a down server cannot grow the hook spool without bound.
+#[cfg(not(test))]
+const MAX_SPOOL_FILES: usize = 10_000;
+#[cfg(test)]
+const MAX_SPOOL_FILES: usize = 3;
 
 /// How a spooled event authenticates to the server when drained.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
@@ -97,7 +103,9 @@ pub fn enqueue(spool: &Path, entry: &SpoolEntry) -> std::io::Result<()> {
     let final_path = spool.join(&name);
     let bytes = serde_json::to_vec(entry)?;
     write_private(&tmp, &bytes)?;
-    std::fs::rename(&tmp, &final_path)
+    std::fs::rename(&tmp, &final_path)?;
+    prune_spool_file_count(spool);
+    Ok(())
 }
 
 fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -220,7 +228,7 @@ pub async fn drain(
             let _ = std::fs::remove_file(&path);
             result.sent += 1;
         } else {
-            entry.attempts += 1;
+            entry.attempts = entry.attempts.saturating_add(1);
             if entry.attempts >= MAX_ATTEMPTS {
                 let _ = std::fs::remove_file(&path);
                 result.dropped += 1;
@@ -264,13 +272,28 @@ pub async fn resolve_bearer(
 async fn resolve_oidc(client: &reqwest::Client, data_dir: &Path) -> Option<String> {
     let auth_path = data_dir.join("auth.json");
     let mut token = OidcToken::load(&auth_path).ok().flatten()?;
-    if token.needs_refresh()
-        && let Ok(refreshed) = refresh_access_token(client, &token).await
-    {
+    if token.needs_refresh() {
+        let Ok(refreshed) = refresh_access_token(client, &token).await else {
+            return None;
+        };
         let _ = refreshed.save(&auth_path);
         token = refreshed;
     }
     Some(token.access.expose_secret().to_string())
+}
+
+fn prune_spool_file_count(spool: &Path) {
+    let Some(mut files) = list_entries(spool) else {
+        return;
+    };
+    let excess = files.len().saturating_sub(MAX_SPOOL_FILES);
+    if excess == 0 {
+        return;
+    }
+    files.sort();
+    for path in files.into_iter().take(excess) {
+        let _ = std::fs::remove_file(path);
+    }
 }
 
 /// List `*.json` spool files (ignoring in-flight `*.json.tmp`), or None when the
@@ -323,6 +346,31 @@ mod tests {
         assert_eq!(loaded.url, "https://x/hook?event=stop");
         assert_eq!(loaded.auth_mode, AuthMode::Static);
         assert_eq!(loaded.token.as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn enqueue_prunes_oldest_files_when_spool_exceeds_limit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spool = spool_dir(tmp.path());
+        for i in 0..(MAX_SPOOL_FILES + 2) {
+            let mut entry = entry_for(
+                format!("https://x/hook?event=e{i}"),
+                "{}".into(),
+                None,
+                false,
+            );
+            entry.created_ms = i as u64;
+            enqueue(&spool, &entry).unwrap();
+        }
+
+        let mut files = list_entries(&spool).unwrap();
+        files.sort();
+        assert_eq!(files.len(), MAX_SPOOL_FILES);
+        let bodies: Vec<SpoolEntry> = files
+            .iter()
+            .map(|path| serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap())
+            .collect();
+        assert!(bodies.iter().all(|entry| entry.created_ms >= 2));
     }
 
     #[tokio::test]
