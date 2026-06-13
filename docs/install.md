@@ -619,9 +619,11 @@ This path is friction-free when:
 
 ## Running ai-memory without docker
 
-Most users should stick to the docker wrapper from the Quick start. Build from
-source only when hacking on ai-memory itself or running on a platform docker
-doesn't support.
+Most users should stick to the docker wrapper from the Quick start. On macOS,
+tagged releases also publish native `ai-memory-macos-aarch64.tar.gz` and
+`ai-memory-macos-x86_64.tar.gz` archives when you only need the client CLI.
+Build from source only when hacking on ai-memory itself or running on a platform
+docker doesn't support.
 
 ```bash
 git clone https://github.com/akitaonrails/ai-memory ~/.ai-memory
@@ -651,13 +653,14 @@ The `serve` subcommand also accepts:
 | `--web-ui-dir <path>` | `AI_MEMORY_WEB_UI_DIR` | Serve a custom SPA from `<path>` instead of the built-in browser. ai-memory injects `<base href>` and `<meta name="ai-memory-base-path">` so the SPA can build relative URLs and API calls under the configured prefix. |
 | `--cors-allow-origin <origin>` | `AI_MEMORY_CORS_ALLOW_ORIGINS` (CSV) | Allow listed origins to call `/api/v1`. Layer is scoped only to that route — `/mcp`, `/hook`, `/admin`, and `/web` remain origin-locked. |
 
-On Windows, see [`docs/windows.md`](windows.md). The short version: run
-the install commands from the same environment that launches the agent.
-WSL2-launched agents need WSL paths and POSIX `.sh` hooks. Native Windows
-agents can use the tagged `ai-memory-windows-x86_64.zip`, the Docker Desktop
-wrapper, or a source build. Native Claude Code uses direct `ai-memory.exe hook`
-commands by default; other native Windows script-hook agents use PowerShell
-`.ps1` defaults.
+On macOS, use the archive matching your architecture: `aarch64` for Apple
+Silicon, `x86_64` for Intel. On Windows, see [`docs/windows.md`](windows.md).
+The short version: run the install commands from the same environment that
+launches the agent. WSL2-launched agents need WSL paths and POSIX `.sh` hooks.
+Native Windows agents can use the tagged `ai-memory-windows-x86_64.zip`, the
+Docker Desktop wrapper, or a source build. Native Claude Code uses direct
+`ai-memory.exe hook` commands by default; other native Windows script-hook
+agents use PowerShell `.ps1` defaults.
 
 When run from source, `install-hooks` finds the bundled scripts in
 the repo's `hooks/` automatically:

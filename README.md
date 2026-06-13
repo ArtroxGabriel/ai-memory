@@ -19,7 +19,7 @@
 | Area | Status | Notes |
 |---|---|---|
 | Linux | Supported | Primary Docker/server target and CI platform. Published Docker images support `linux/amd64` and `linux/arm64`. Native Arch/AUR packages include system and user systemd units. |
-| macOS | Supported | Workspace tests run in CI; native source builds are supported. Docker images run natively on Apple Silicon via the `linux/arm64` manifest. |
+| macOS | Supported | Workspace tests run in CI; tagged releases publish native `ai-memory-macos-aarch64.tar.gz` and `ai-memory-macos-x86_64.tar.gz` binaries. Docker images run natively on Apple Silicon via the `linux/arm64` manifest. |
 | Windows via WSL2 | Supported | Use the Linux install path inside WSL2 when the agent runs there. |
 | Native Windows | Experimental | Tagged releases publish `ai-memory-windows-x86_64.zip` with `ai-memory.exe`; Docker Desktop wrapper and source builds are also available. Claude Code uses direct native `ai-memory.exe hook` commands by default; other script-hook agents use the current PowerShell defaults pending harness feedback. See [`docs/windows.md`](docs/windows.md). |
 | Claude Code | Supported | MCP config + lifecycle hooks. |

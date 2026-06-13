@@ -91,10 +91,18 @@ fn docker_publish_jobs_use_prebuilt_binaries() {
     let release = read_repo(".github/workflows/release.yml");
     assert!(release.contains("artifact: ai-memory-linux-x86_64"));
     assert!(release.contains("artifact: ai-memory-linux-aarch64"));
+    assert!(release.contains("artifact: ai-memory-macos-aarch64"));
+    assert!(release.contains("artifact: ai-memory-macos-x86_64"));
+    assert!(release.contains("needs: [binary, macos, windows, validate-version]"));
     assert!(release.contains("target: runtime-prebuilt-amd64"));
     assert!(release.contains("target: runtime-prebuilt-arm64"));
 
     let ci = read_repo(".github/workflows/ci.yml");
-    assert!(ci.contains("ci-ai-memory-linux-x86_64"));
+    assert!(ci.contains("ci-ai-memory-${{ matrix.artifact }}"));
+    assert!(ci.contains("artifact: linux-x86_64"));
+    assert!(ci.contains("artifact: macos-aarch64"));
+    assert!(ci.contains("artifact: macos-x86_64"));
+    assert!(ci.contains("runner: macos-15"));
+    assert!(ci.contains("runner: macos-15-intel"));
     assert!(ci.contains("--target runtime-prebuilt-amd64"));
 }

@@ -51,10 +51,20 @@ jobs:
   # (LTO crash, codegen issue, dead-code-with-debug-assertions) doesn't
   # ship to Docker Hub silently.
   release-build:
-    name: cargo build --release
-    # Match the release workflow so the prebuilt binary runs on Debian bookworm
-    # in the Docker runtime image.
-    runs-on: ubuntu-22.04
+    name: cargo build --release (${{ matrix.artifact }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Keep Linux on Debian bookworm so the prebuilt binary matches the
+          # Docker runtime image. macOS entries mirror the release assets.
+          - artifact: linux-x86_64
+            runner: ubuntu-22.04
+          - artifact: macos-aarch64
+            runner: macos-15
+          - artifact: macos-x86_64
+            runner: macos-15-intel
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -64,7 +74,7 @@ jobs:
         run: cargo build --release --bin ai-memory
       - uses: actions/upload-artifact@v4
         with:
-          name: ci-ai-memory-linux-x86_64
+          name: ci-ai-memory-${{ matrix.artifact }}
           path: target/release/ai-memory
 
   native-packaging:
